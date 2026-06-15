@@ -8,13 +8,12 @@
 
 > A LSPosed module that lets you long-press any letter key in Doubao IME to start voice input — like the toolbar mic button, but from any letter. Hold to record, release to commit, swipe out to cancel.
 
-<!--
-演示动图 / Demo GIF (待补充)
+<p align="center">
+  <img src="docs/media/demo.gif" alt="演示：长按字母键触发语音 + 滑出取消" width="320">
+</p>
 
-把演示文件放在 docs/media/ 目录下后，取消下面这行的注释：
-
-![Demo](docs/media/demo.gif)
--->
+> 演示内容：①长按字母键触发语音输入 → 说话 → 松手上屏 ②长按触发语音后，向上滑出键盘 → 取消（不上屏）
+>
 
 ---
 
