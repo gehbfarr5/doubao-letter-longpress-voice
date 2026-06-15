@@ -1,8 +1,20 @@
 # 豆包字母键长按语音 / Doubao Letter Long-Press Voice
 
+[![Build & Release](https://github.com/gehbfarr5/doubao-letter-longpress-voice/actions/workflows/build.yml/badge.svg)](https://github.com/gehbfarr5/doubao-letter-longpress-voice/actions/workflows/build.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/gehbfarr5/doubao-letter-longpress-voice)](../../releases/latest)
+
 一个 LSPosed 模块：**长按豆包输入法 26 键 / 9 宫格字母键触发语音输入**，按住录音、原地松手上屏、上滑取消。
 
 > A LSPosed module that lets you long-press any letter key in Doubao IME to start voice input — like the toolbar mic button, but from any letter. Hold to record, release to commit, swipe out to cancel.
+
+<!--
+演示动图 / Demo GIF (待补充)
+
+把演示文件放在 docs/media/ 目录下后，取消下面这行的注释：
+
+![Demo](docs/media/demo.gif)
+-->
 
 ---
 
