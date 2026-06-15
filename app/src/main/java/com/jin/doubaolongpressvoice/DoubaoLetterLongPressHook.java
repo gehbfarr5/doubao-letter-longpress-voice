@@ -135,6 +135,13 @@ public final class DoubaoLetterLongPressHook {
     private static final float NINE_KEY_X_LEFT = 0.15f;
     private static final float NINE_KEY_X_RIGHT = 0.85f;
     private static final float ONE_HAND_WIDTH_RATIO = 0.85f;
+    // Top exclusion = toolbar / candidates bar / translation banner area.
+    // Doubao normally renders a one-row toolbar (AI / 翻译 / 剪贴板 ...) above the
+    // key rows; when the translation feature is on, the toolbar grows another row.
+    // We detect this by the KeyboardView h/w ratio (normal ≈ 0.74, tall ≈ 0.90+).
+    private static final float LETTER_TOP_NORMAL = 0.08f;
+    private static final float LETTER_TOP_TALL = 0.22f;
+    private static final float TALL_KBD_H_OVER_W = 0.85f;
 
     // Swipe detection threshold (dp; converted to px at runtime per device).
     private static final float SWIPE_THRESHOLD_DP = 20f;
@@ -220,8 +227,10 @@ public final class DoubaoLetterLongPressHook {
                                     return;
                                 }
                                 if (!isLetterZone(x, y, w, h, kbdType)) {
+                                    boolean tall = (h > w * TALL_KBD_H_OVER_W);
                                     log("gate=geom_outside x=" + x + " y=" + y
-                                            + " w=" + w + " h=" + h + " kbdType=" + kbdType);
+                                            + " w=" + w + " h=" + h + " kbdType=" + kbdType
+                                            + " tallTb=" + tall);
                                     return;
                                 }
                                 float thresholdSq = ensureSwipeThresholdPxSq(kvView);
@@ -763,14 +772,25 @@ public final class DoubaoLetterLongPressHook {
         if (w <= 0 || h <= 0) {
             return false;
         }
+        // Top exclusion (toolbar / candidates / translation banner). Picks the
+        // wider cutoff when the keyboard is taller than a usual 4-row layout,
+        // which means Doubao raised the toolbar (translation mode etc.).
+        boolean tallToolbar = (h > w * TALL_KBD_H_OVER_W);
+        float topRatio = tallToolbar ? LETTER_TOP_TALL : LETTER_TOP_NORMAL;
+        if (y < h * topRatio) {
+            return false;
+        }
+        // Bottom row (space + function keys).
         if (y >= h * LETTER_BOTTOM) {
             return false;
         }
         if (kbdType == KBD_TYPE_9KEY) {
+            // 9-key: left mode col + right backspace col are excluded for every row.
             if (x < w * NINE_KEY_X_LEFT || x > w * NINE_KEY_X_RIGHT) {
                 return false;
             }
         } else {
+            // QWERTY-like: only row 3 edges (Shift / Backspace).
             if (y >= h * LETTER_ROW3_TOP
                     && (x < w * LETTER_ROW3_X_LEFT || x > w * LETTER_ROW3_X_RIGHT)) {
                 return false;
