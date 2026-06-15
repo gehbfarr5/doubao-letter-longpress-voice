@@ -211,6 +211,7 @@ public final class DoubaoLetterLongPressHook {
                                 int h = kvView.getHeight();
                                 int kbdType = readKbdType(cl);
                                 int inputClass = readInputClass(cl);
+                                int toolbarHeight = readToolbarHeight(cl);
 
                                 if (isNonTextInputClass(inputClass)) {
                                     log("gate=non_text_input inputClass=0x"
@@ -226,11 +227,10 @@ public final class DoubaoLetterLongPressHook {
                                     log("gate=mode_blocked (floating/oneHand) skip");
                                     return;
                                 }
-                                if (!isLetterZone(x, y, w, h, kbdType)) {
-                                    boolean tall = (h > w * TALL_KBD_H_OVER_W);
+                                if (!isLetterZone(x, y, w, h, kbdType, toolbarHeight)) {
                                     log("gate=geom_outside x=" + x + " y=" + y
                                             + " w=" + w + " h=" + h + " kbdType=" + kbdType
-                                            + " tallTb=" + tall);
+                                            + " toolbarH=" + toolbarHeight);
                                     return;
                                 }
                                 float thresholdSq = ensureSwipeThresholdPxSq(kvView);
@@ -703,6 +703,18 @@ public final class DoubaoLetterLongPressHook {
         }
     }
 
+    /** Returns the toolbar height in pixels reported by Doubao, or -1 on failure. */
+    private static int readToolbarHeight(ClassLoader cl) {
+        try {
+            Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
+            Object inst = XposedHelpers.callStaticMethod(jni, "getKeyboardJni");
+            Object v = XposedHelpers.callMethod(inst, "getToolbarHeight");
+            return (v instanceof Integer) ? (Integer) v : -1;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
     private static int readInputClass(ClassLoader cl) {
         try {
             Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
@@ -768,17 +780,23 @@ public final class DoubaoLetterLongPressHook {
         }
     }
 
-    private static boolean isLetterZone(int x, int y, int w, int h, int kbdType) {
+    private static boolean isLetterZone(int x, int y, int w, int h, int kbdType,
+                                        int toolbarHeight) {
         if (w <= 0 || h <= 0) {
             return false;
         }
-        // Top exclusion (toolbar / candidates / translation banner). Picks the
-        // wider cutoff when the keyboard is taller than a usual 4-row layout,
-        // which means Doubao raised the toolbar (translation mode etc.).
-        boolean tallToolbar = (h > w * TALL_KBD_H_OVER_W);
-        float topRatio = tallToolbar ? LETTER_TOP_TALL : LETTER_TOP_NORMAL;
-        if (y < h * topRatio) {
+        // Primary top exclusion: Doubao's native getToolbarHeight() in pixels.
+        // Translation mode raises the toolbar; this value grows accordingly.
+        if (toolbarHeight > 0 && y < toolbarHeight) {
             return false;
+        }
+        // Fallback ratio when native call failed (toolbarHeight <= 0).
+        if (toolbarHeight <= 0) {
+            boolean tallToolbar = (h > w * TALL_KBD_H_OVER_W);
+            float topRatio = tallToolbar ? LETTER_TOP_TALL : LETTER_TOP_NORMAL;
+            if (y < h * topRatio) {
+                return false;
+            }
         }
         // Bottom row (space + function keys).
         if (y >= h * LETTER_BOTTOM) {
