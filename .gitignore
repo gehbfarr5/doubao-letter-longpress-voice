@@ -1,3 +1,15 @@
+# Orchestra runtime artifacts (planner/verifier reports stay tracked,
+# only the wrapper-generated ephemeral files are ignored)
+orchestra/.lock
+orchestra/.done
+orchestra/.codex-last.md
+orchestra/.codex-status
+orchestra/.baseline
+orchestra/.baseline-stash
+orchestra/.rx.patch
+orchestra/.auto-git
+orchestra/*.tmp
+
 # Built application files
 *.apk
 *.aar
