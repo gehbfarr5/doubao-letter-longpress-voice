@@ -1,14 +1,31 @@
 package com.jin.doubaolongpressvoice;
 
+import android.animation.ArgbEvaluator;
+import android.animation.ValueAnimator;
+import android.graphics.Color;
+import android.graphics.PorterDuff;
+import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.SystemClock;
 import android.text.InputType;
 import android.util.Log;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewParent;
+import android.view.animation.OvershootInterpolator;
 import android.view.inputmethod.EditorInfo;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.RelativeLayout;
+import android.widget.TextView;
 
 import java.lang.ref.SoftReference;
 import java.lang.reflect.Field;
@@ -93,15 +110,74 @@ public final class DoubaoLetterLongPressHook {
             "com.bytedance.android.input.common.VibrationController";
     private static final String ASR_MANAGER =
             "com.bytedance.android.input.speech.AsrManager";
+    private static final String EDITOR_VIEW_INFO =
+            "com.bytedance.android.input.speech.view.o";
+    private static final String DOUBAO_PACKAGE = "com.bytedance.android.doubaoime";
 
     private static final int MSG_LONGPRESS = 1;
     private static final int DO_FUNCTION_KEY_VOICE_START = 6;
     private static final int DO_FUNCTION_KEY_VOICE_STOP = 7;
+    private static final int DO_FUNCTION_KEY_SEND_ACTION = 2;   // doSendAction()
     private static final int ACTION_CANCEL = MotionEvent.ACTION_CANCEL;
     private static final String ASR_CANCEL_REASON = "cancel";
     private static final long CANCEL_WINDOW_MS = 1200L;
     private static final long COMMIT_TAIL_DELAY_MS = 600L;     // fallback path only
     private static final long ASR_START_VERIFY_DELAY_MS = 80L;
+    private static final long NEWLINE_KEY_DELAY_MS = 200L;     // wait after p0() before sending ENTER
+
+    // Zone-tracking constants for in-recording slide-to-action.
+    private static final long ZONE_DEBOUNCE_MS = 50L;
+    private static final long SELECTION_ANIM_MS = 180L;
+    private static final long HIDE_ANIM_MS = 120L;
+    private static final float SELECTION_SCALE = 1.04f;       // 微微放大
+    private static final float SELECTION_SCALE_INITIAL = 0.92f;  // pop-in starting scale
+    // Full-width strip across toolbar, icon+text in a single row. Margins
+    // come from Doubao's own asr_editor_candidate_container_padding_horizontal
+    // (visually matches candidate-word to boundary spacing); 8dp fallback
+    // if that resource can't be resolved. Applied uniformly on all 4 sides.
+    private static final int OVERLAY_ICON_SIZE_DP = 20;
+    private static final int OVERLAY_TEXT_SP = 14;
+    private static final int OVERLAY_ICON_TEXT_GAP_DP = 6;     // gap between icon and label
+    private static final int OVERLAY_MARGIN_FALLBACK_DP = 8;
+    private static final String DIMEN_NAME_OVERLAY_MARGIN =
+            "asr_editor_candidate_container_padding_horizontal";
+    private static final float OVERLAY_CORNER_RADIUS_DP = 8f;  // candidate-box style
+    private static final float OVERLAY_ELEVATION_DP = 3f;
+    // Brand-aligned colors (opaque). Matches what Doubao uses for press states
+    // (`asr_long_press_navigation_press` blue), with an error-red sibling.
+    private static final int COLOR_SEND = 0xFF1A77FF;     // brand blue
+    private static final int COLOR_CANCEL = 0xFFFF4D4F;   // error red
+    private static final int COLOR_TRANSPARENT = 0x00000000;
+    // Per-action overlay labels (kept in sync with AsrLongPressView's right
+    // button via Doubao's asr_long_press_*_text resources; we use plain string
+    // fallbacks if resource lookup fails).
+    private static final String TEXT_NEWLINE = "换行";
+    private static final String TEXT_CANCEL = "撤回输入";
+    private static final String RES_NAME_NEWLINE = "asr_long_press_enter_text";   // (换行)
+    private static final String RES_NAME_GO = "asr_long_press_go_text";           // (前往)
+    private static final String RES_NAME_SEARCH = "asr_long_press_search_text";   // (搜索)
+    private static final String RES_NAME_SEND = "asr_long_press_send_text";       // (发送)
+    private static final String RES_NAME_NEXT = "asr_long_press_next_text";       // (下一项)
+    private static final String RES_NAME_DONE = "asr_long_press_done_text";       // (完成)
+    private static final String RES_NAME_PREVIOUS = "asr_long_press_previous_text"; // (上一项)
+    // Plain-string fallbacks if resource lookup fails.
+    private static final String FALLBACK_GO = "前往";
+    private static final String FALLBACK_SEARCH = "搜索";
+    private static final String FALLBACK_SEND = "发送";
+    private static final String FALLBACK_NEXT = "下一项";
+    private static final String FALLBACK_DONE = "完成";
+    private static final String FALLBACK_PREVIOUS = "上一项";
+
+    // Doubao drawable resource names for the icons (the `oic_*` set is Doubao's
+    // toolbar/action icon family; `ic_delete_white` is the trash can shown on
+    // backspace swipe-up clear).
+    private static final String DRW_NAME_SEND = "oic_send";
+    private static final String DRW_NAME_SEARCH = "oic_search";
+    private static final String DRW_NAME_ENTER = "oic_enter";
+    private static final String DRW_NAME_FINISH = "oic_finish";
+    private static final String DRW_NAME_NEXT = "oic_next";
+    private static final String DRW_NAME_PREVIOUS = "oic_previous";
+    private static final String DRW_NAME_CANCEL = "ic_delete_white";
 
     // Whitelisted CommitSource values that always flow through, even mid-
     // cancel-window. Sourced from KeyboardJni$CommitSource constants.
@@ -146,6 +222,9 @@ public final class DoubaoLetterLongPressHook {
     // Swipe detection threshold (dp; converted to px at runtime per device).
     private static final float SWIPE_THRESHOLD_DP = 20f;
 
+    /** In-recording finger zone (drives slide-to-action). */
+    private enum Zone { LETTER, TOOLBAR, OUTSIDE }
+
     // --- volatile per-session state ---
     private static volatile long sCancelUntilElapsed = 0L;
     private static volatile boolean sSuppressNextUp = false;
@@ -154,12 +233,20 @@ public final class DoubaoLetterLongPressHook {
     private static volatile float sMaxDisplacementSq;
     private static volatile float sSwipeThresholdPxSq = -1f;
     private static volatile Runnable sPendingCommit;
+    private static volatile Zone sCurrentZone = Zone.LETTER;
+    private static volatile long sLastZoneChangeTs = 0L;
+    private static volatile LinearLayout sOverlay;
+    private static volatile ImageView sOverlayIcon;
+    private static volatile TextView sOverlayLabel;
+    private static volatile int sCurrentOverlayColor = COLOR_TRANSPARENT;
+    private static volatile ValueAnimator sColorAnimator;
 
     // --- lazy-resolved Doubao internals ---
     private static volatile Object sUserInteractiveMgr;
     private static volatile Object sKeySoundKeyboard;
     private static volatile Object sKeyVibrateStandard;
     private static volatile Object sVibTypeSpeechStart;
+    private static volatile Object sVibTypeConfirm;           // for zone-selection feedback
     private static volatile boolean sFeedbackResolveAttempted;
     private static volatile boolean sFeedbackResolveOk;
     private static volatile Object sAsrManager;
@@ -244,14 +331,18 @@ public final class DoubaoLetterLongPressHook {
 
                                 log("HIT letter long-press x=" + x + " y=" + y
                                         + " w=" + w + " h=" + h + " kbdType=" + kbdType
+                                        + " toolbarH=" + toolbarHeight
                                         + " -> DoFunctionKey(6)");
                                 sCancelUntilElapsed = 0L;
                                 cancelPendingCommit();
                                 sSuppressNextUp = true;
+                                sCurrentZone = Zone.LETTER;
+                                sLastZoneChangeTs = SystemClock.elapsedRealtime();
                                 param.setResult(null);
                                 triggerVoiceStart(cl);
                                 sendCancelToNative(kvView, x, y);
                                 performSpeechStartFeedback();
+                                ensureOverlay(cl, toolbarHeight);
                                 scheduleAsrStartVerification(cl);
                             } catch (Throwable t) {
                                 log("ERR handleMessage hook: " + Log.getStackTraceString(t));
@@ -289,6 +380,12 @@ public final class DoubaoLetterLongPressHook {
                                     if (distSq > sMaxDisplacementSq) {
                                         sMaxDisplacementSq = distSq;
                                     }
+                                    // While voice is active, track zone for slide-to-action.
+                                    if (sSuppressNextUp && param.thisObject instanceof View) {
+                                        View vv = (View) param.thisObject;
+                                        maybeUpdateZone(cl, vv, ev.getX(), ev.getY(),
+                                                vv.getWidth(), vv.getHeight());
+                                    }
                                 }
 
                                 if (!sSuppressNextUp) {
@@ -308,29 +405,49 @@ public final class DoubaoLetterLongPressHook {
                                 }
                                 sSuppressNextUp = false;
 
-                                boolean cancelIntent = (action == MotionEvent.ACTION_CANCEL);
+                                // Determine release zone (CANCEL always = OUTSIDE; UP uses coord).
+                                Zone releaseZone;
                                 float ux = 0f, uy = 0f;
                                 int vw = 0, vh = 0;
-                                if (!cancelIntent && param.thisObject instanceof View) {
+                                if (action == MotionEvent.ACTION_CANCEL) {
+                                    releaseZone = Zone.OUTSIDE;
+                                } else if (param.thisObject instanceof View) {
                                     View vv = (View) param.thisObject;
                                     ux = ev.getX();
                                     uy = ev.getY();
                                     vw = vv.getWidth();
                                     vh = vv.getHeight();
-                                    cancelIntent = (ux < 0f || uy < 0f || ux > vw || uy > vh);
-                                }
-                                if (cancelIntent) {
-                                    cancelPendingCommit();
-                                    cancelVoice(cl);
-                                    log("release action=" + actionName(action)
-                                            + " coord=(" + ux + "," + uy + ")/" + vw + "x" + vh
-                                            + " -> cancel");
+                                    int tbH = readToolbarHeight(cl);
+                                    releaseZone = computeZone(ux, uy, vw, vh, tbH);
                                 } else {
-                                    commitVoice(cl);
-                                    log("release action=" + actionName(action)
-                                            + " coord=(" + ux + "," + uy + ")/" + vw + "x" + vh
-                                            + " -> commit");
+                                    releaseZone = sCurrentZone;
                                 }
+
+                                switch (releaseZone) {
+                                    case OUTSIDE:
+                                        cancelPendingCommit();
+                                        cancelVoice(cl);
+                                        log("release action=" + actionName(action)
+                                                + " coord=(" + ux + "," + uy + ")/" + vw + "x" + vh
+                                                + " zone=OUTSIDE -> cancel");
+                                        break;
+                                    case TOOLBAR:
+                                        cancelPendingCommit();
+                                        commitAndDispatchToolbarAction(cl);
+                                        log("release action=" + actionName(action)
+                                                + " coord=(" + ux + "," + uy + ")/" + vw + "x" + vh
+                                                + " zone=TOOLBAR -> action dispatch");
+                                        break;
+                                    default:
+                                        commitVoice(cl);
+                                        log("release action=" + actionName(action)
+                                                + " coord=(" + ux + "," + uy + ")/" + vw + "x" + vh
+                                                + " zone=LETTER -> commit");
+                                        break;
+                                }
+                                // Reset zone state and hide overlay.
+                                sCurrentZone = Zone.LETTER;
+                                updateOverlayForZone(Zone.LETTER, 0, cl);
                                 param.setResult(true);
                             } catch (Throwable t) {
                                 log("ERR onTouchEvent hook: " + Log.getStackTraceString(t));
@@ -435,7 +552,22 @@ public final class DoubaoLetterLongPressHook {
         sSuppressNextUp = false;
         sCancelUntilElapsed = 0L;
         sMaxDisplacementSq = 0f;
+        sCurrentZone = Zone.LETTER;
         cancelPendingCommit();
+        // Detach overlay; reattach lazily next time.
+        LinearLayout ov = sOverlay;
+        if (ov != null) {
+            try {
+                ViewParent p = ov.getParent();
+                if (p instanceof ViewGroup) {
+                    ((ViewGroup) p).removeView(ov);
+                }
+            } catch (Throwable ignore) {
+            }
+            sOverlay = null;
+            sOverlayIcon = null;
+            sOverlayLabel = null;
+        }
     }
 
     // ===== Action helpers =====
@@ -459,32 +591,123 @@ public final class DoubaoLetterLongPressHook {
      * If the {@code p0} reflection fails, falls back to {@code forceVad()} +
      * delayed {@code DoFunctionKey(7)} for safety.
      */
-    private static void commitVoice(final ClassLoader cl) {
+    /**
+     * Toolbar release dispatcher. Splits by enterActionType:
+     * <ul>
+     *   <li><b>Specific send action</b> (GO / SEARCH / SEND / SEND_EXPRESSION):
+     *       routes through {@code AsrManager.t(ord, now)} so Doubao's
+     *       "wait for all ASR back + 整理 + perform action" flow runs.
+     *       Adds latency (~1s) but ensures the action sees the final
+     *       polished ASR text — same behavior as Doubao space-long-press
+     *       slide-to-send.</li>
+     *   <li><b>Newline-like</b> (UNSPECIFIED / NONE / NEXT / DONE / PREVIOUS):
+     *       skips {@code t()}'s wait path; commits ASR via {@code p0(false,"")}
+     *       (keeps 整理 commit-time semantics) and sends {@code KEYCODE_ENTER}
+     *       after a short settle. Result: newline shows up promptly.</li>
+     * </ul>
+     */
+    private static void commitAndDispatchToolbarAction(final ClassLoader cl) {
         cancelPendingCommit();
+        Object inputView = getInputView(cl);
+        callInputViewR(inputView, false);
+
+        int enterOrdinal = resolveEnterOrdinal(cl);
+        if (enterOrdinal < 0) {
+            enterOrdinal = 1;
+        }
+        boolean specific = isSpecificSendOrdinal(enterOrdinal);
+        log("toolbar release enterOrdinal=" + enterOrdinal
+                + " specificSend=" + specific);
+
+        if (specific) {
+            dispatchViaAsrManagerT(cl, enterOrdinal);
+        } else {
+            dispatchNewlineFast(cl);
+        }
+    }
+
+    /**
+     * Specific-action path: {@code AsrManager.t(ord, now)} — Doubao's official
+     * "wait for ASR back, then perform action" flow. Has built-in latency but
+     * ensures the editor (e.g., WeChat) receives the polished final text.
+     */
+    private static void dispatchViaAsrManagerT(ClassLoader cl, int enterOrdinal) {
+        Object mgr = ensureAsrManager(cl);
+        if (mgr == null) {
+            log("skip t(): AsrManager not resolvable");
+            return;
+        }
+        try {
+            XposedHelpers.callMethod(mgr, "t",
+                    new Class<?>[]{int.class, long.class},
+                    enterOrdinal, System.currentTimeMillis());
+            log("AsrManager.t(" + enterOrdinal + ", now) fired (specific send)");
+        } catch (Throwable e) {
+            log("ERR AsrManager.t(): " + e.getClass().getSimpleName()
+                    + " -> " + Log.getStackTraceString(e));
+        }
+    }
+
+    /**
+     * Newline-fast path: commit ASR text via p0(false,"") and post-delay an
+     * ENTER key event so the newline lands after the committed text without
+     * blocking on {@code t()}'s wait-for-asr-back flow.
+     */
+    private static void dispatchNewlineFast(final ClassLoader cl) {
         Object mgr = ensureAsrManager(cl);
         if (mgr != null) {
             try {
                 XposedHelpers.callMethod(mgr, "p0", false, "");
-                log("AsrManager.p0(false,\"\") fired (commit, panel-stop mimic)");
-                return;
+                log("p0(false,\"\") fired (newline path, fast)");
             } catch (Throwable e) {
-                log("ERR p0(false,\"\"): " + e.getClass().getSimpleName()
-                        + " -> fallback to forceVad + DoFunctionKey(7)");
+                log("ERR p0(): " + e.getClass().getSimpleName());
             }
         }
-        forceVad(cl);
-        Runnable r = new Runnable() {
-            @Override
-            public void run() {
-                if (sPendingCommit != this) {
-                    return;
-                }
-                sPendingCommit = null;
-                stopVoiceCommitFallback(cl);
+        sMainHandler.postDelayed(() -> sendEnterKey(cl), NEWLINE_KEY_DELAY_MS);
+    }
+
+    /** Sends KEYCODE_ENTER (66) via {@code InputMethodService.sendDownUpKeyEvents}. */
+    private static void sendEnterKey(ClassLoader cl) {
+        try {
+            Class<?> jniCls = XposedHelpers.findClass(KEYBOARD_JNI, cl);
+            Object ime = XposedHelpers.getStaticObjectField(jniCls, "mImeService");
+            if (ime == null) {
+                log("skip sendEnterKey: mImeService null");
+                return;
             }
-        };
-        sPendingCommit = r;
-        sMainHandler.postDelayed(r, COMMIT_TAIL_DELAY_MS);
+            XposedHelpers.callMethod(ime, "sendDownUpKeyEvents", 66);
+            log("sent KEYCODE_ENTER (newline)");
+        } catch (Throwable t) {
+            log("ERR sendEnterKey: " + t.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Letter zone release = ordinary commit, mirrors space long-press "lift
+     * anywhere not on a slide button". Calls {@code InputView.R(false)} +
+     * {@code AsrManager.q0()} (graceful stop with 150ms delay to {@code p0}).
+     */
+    private static void commitVoice(final ClassLoader cl) {
+        cancelPendingCommit();
+        Object inputView = getInputView(cl);
+        callInputViewR(inputView, false);
+
+        Object mgr = ensureAsrManager(cl);
+        if (mgr == null) {
+            log("skip q0(): AsrManager not resolvable");
+            return;
+        }
+        try {
+            XposedHelpers.callMethod(mgr, "q0");
+            log("AsrManager.q0() fired (commit, graceful)");
+        } catch (Throwable e) {
+            log("ERR q0(): " + e.getClass().getSimpleName()
+                    + " -> fallback p0(false,\"\")");
+            try {
+                XposedHelpers.callMethod(mgr, "p0", false, "");
+            } catch (Throwable ignore) {
+            }
+        }
     }
 
     private static void stopVoiceCommitFallback(ClassLoader cl) {
@@ -571,6 +794,18 @@ public final class DoubaoLetterLongPressHook {
         }
     }
 
+    /** CONFIRM-type haptic when entering a TOOLBAR / OUTSIDE selection zone. */
+    private static void performZoneSelectionFeedback() {
+        if (!ensureFeedbackHandles() || sVibTypeConfirm == null) {
+            return;
+        }
+        try {
+            XposedHelpers.callMethod(sUserInteractiveMgr, "g",
+                    sKeySoundKeyboard, sKeyVibrateStandard, sVibTypeConfirm, false);
+        } catch (Throwable ignore) {
+        }
+    }
+
     /**
      * Defense against silent-fail ASR start (mic permission denied, model not
      * loaded, etc.): re-check after {@value #ASR_START_VERIFY_DELAY_MS} ms,
@@ -628,12 +863,18 @@ public final class DoubaoLetterLongPressHook {
 
             Class<?> vibTypeEnum = XposedHelpers.findClass(VIBRATION_CONTROLLER + "$VibrationType", cl);
             sVibTypeSpeechStart = XposedHelpers.getStaticObjectField(vibTypeEnum, "SPEECH_START");
+            try {
+                sVibTypeConfirm = XposedHelpers.getStaticObjectField(vibTypeEnum, "CONFIRM");
+            } catch (Throwable ignore) {
+                // CONFIRM is optional; zone-selection haptic falls silent.
+            }
 
             sFeedbackResolveOk = sUserInteractiveMgr != null
                     && sKeySoundKeyboard != null
                     && sKeyVibrateStandard != null
                     && sVibTypeSpeechStart != null;
-            log("feedback handles resolved (lazy): ok=" + sFeedbackResolveOk);
+            log("feedback handles resolved (lazy): ok=" + sFeedbackResolveOk
+                    + " confirm=" + (sVibTypeConfirm != null));
             return sFeedbackResolveOk;
         } catch (Throwable t) {
             log("ERR ensureFeedbackHandles: " + Log.getStackTraceString(t));
@@ -819,6 +1060,507 @@ public final class DoubaoLetterLongPressHook {
 
     private static boolean isInCancelWindow() {
         return SystemClock.elapsedRealtime() < sCancelUntilElapsed;
+    }
+
+    // ===== Zone tracking + slide-to-action =====
+
+    private static Zone computeZone(float x, float y, int w, int h, int toolbarHeight) {
+        if (x < 0f || y < 0f || x >= w || y >= h) {
+            return Zone.OUTSIDE;
+        }
+        if (toolbarHeight > 0 && y < toolbarHeight) {
+            return Zone.TOOLBAR;
+        }
+        return Zone.LETTER;
+    }
+
+    /**
+     * Called from {@code KeyboardView.onTouchEvent}'s ACTION_MOVE branch while
+     * voice is recording. Re-computes the current zone, applies debounce, and
+     * updates UI + haptic on transition.
+     */
+    private static void maybeUpdateZone(ClassLoader cl, View kvView, float x, float y,
+                                        int w, int h) {
+        int tbH = readToolbarHeight(cl);
+        Zone next = computeZone(x, y, w, h, tbH);
+        if (next == sCurrentZone) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (now - sLastZoneChangeTs < ZONE_DEBOUNCE_MS) {
+            return;
+        }
+        Zone prev = sCurrentZone;
+        sCurrentZone = next;
+        sLastZoneChangeTs = now;
+        // Make sure overlay exists (may be detached after lifecycle reset).
+        ensureOverlay(cl, tbH);
+        int enterOrdinal = resolveEnterOrdinal(cl);
+        updateOverlayForZone(next, enterOrdinal, cl);
+        if (next == Zone.TOOLBAR || next == Zone.OUTSIDE) {
+            performZoneSelectionFeedback();
+        }
+        // Detailed diagnostic — three sources side by side so we can spot drift.
+        int srcA = readEnterTypeFromEditorViewInfo(cl);
+        int srcB = readEnterTypeOrdinal(cl);
+        int rawAct = readCurrentEditboxAction(cl);
+        log("zone " + prev + " -> " + next + " coord=(" + x + "," + y
+                + ") tbH=" + tbH
+                + " EditorViewInfo.d=" + srcA
+                + " mCurrentEnterType.ord=" + srcB
+                + " mCurrentEditboxAction=0x" + Integer.toHexString(rawAct)
+                + " resolved=" + enterOrdinal);
+    }
+
+    /**
+     * Reads {@code ImeService.x} — the {@code InputView} singleton (a
+     * FrameLayout that hosts toolbar + candidates + keyboard).
+     */
+    private static Object getInputView(ClassLoader cl) {
+        try {
+            Class<?> imeServiceCls = XposedHelpers.findClass(IME_SERVICE, cl);
+            return XposedHelpers.getStaticObjectField(imeServiceCls, "x");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** Calls {@code InputView.R(boolean)} — tidies up ASR UI before sending. */
+    private static void callInputViewR(Object inputView, boolean z) {
+        if (inputView == null) {
+            return;
+        }
+        try {
+            XposedHelpers.callMethod(inputView, "R", z);
+        } catch (Throwable t) {
+            log("ERR InputView.R(): " + t.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Resolves the canonical {@code EnterActionType} ordinal Doubao would use.
+     * Cross-checks three sources and picks the most specific (highest ordinal
+     * known to be a real IME action), because in some apps (notably WeChat
+     * chat) {@code KeyboardJni.mCurrentEnterType} ends up stale at
+     * {@code kUnknow}/{@code kIME_ACTION_NONE} when {@code IME_FLAG_NO_ENTER_ACTION}
+     * is set on imeOptions.
+     *
+     * <p>Sources tried, in priority order:
+     * <ol>
+     *   <li>{@code EditorViewInfo.e().d()} — the cached value AsrLongPressView
+     *       reads from when picking its right-button text;</li>
+     *   <li>{@code KeyboardJni.mCurrentEnterType.ordinal()};</li>
+     *   <li>{@code KeyboardJni.mCurrentEditboxAction & 0xFF} — raw imeOptions
+     *       action bits (catches cases where flags polluted the others).</li>
+     * </ol>
+     */
+    private static int resolveEnterOrdinal(ClassLoader cl) {
+        int fromEditorViewInfo = readEnterTypeFromEditorViewInfo(cl);
+        int fromEnterType = readEnterTypeOrdinal(cl);
+        int rawAction = readCurrentEditboxAction(cl);
+        int fromRawLow = rawAction & 0xFF;
+        // Pick the highest "specific" value (in {2..8}). If none is specific,
+        // fall back to the highest non-negative value.
+        int best = -1;
+        for (int candidate : new int[]{fromEditorViewInfo, fromEnterType, fromRawLow}) {
+            if (candidate >= 2 && candidate <= 8) {
+                if (candidate > best) {
+                    best = candidate;
+                }
+            }
+        }
+        if (best >= 0) {
+            return best;
+        }
+        // None specific — pick the highest non-negative for diagnostic clarity.
+        return Math.max(0, Math.max(fromEditorViewInfo, Math.max(fromEnterType, fromRawLow)));
+    }
+
+    private static int readEnterTypeOrdinal(ClassLoader cl) {
+        try {
+            Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
+            Object v = XposedHelpers.getStaticObjectField(jni, "mCurrentEnterType");
+            if (v instanceof Enum) {
+                return ((Enum<?>) v).ordinal();
+            }
+            return -1;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    private static int readEnterTypeFromEditorViewInfo(ClassLoader cl) {
+        try {
+            Class<?> oClass = XposedHelpers.findClass(EDITOR_VIEW_INFO, cl);
+            Object instance = XposedHelpers.callStaticMethod(oClass, "e");
+            Object v = XposedHelpers.callMethod(instance, "d");
+            return (v instanceof Integer) ? (Integer) v : -1;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    private static int readCurrentEditboxAction(ClassLoader cl) {
+        try {
+            Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
+            Object v = XposedHelpers.getStaticObjectField(jni, "mCurrentEditboxAction");
+            return (v instanceof Integer) ? (Integer) v : 0;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /**
+     * Whether this enterActionType corresponds to a real "send / submit" action
+     * Doubao actually surfaces in its UI. Verified by comparing with Doubao's
+     * space-long-press: only {GO, SEARCH, SEND, SEND_EXPRESSION} are treated as
+     * a specific action; NEXT / DONE / PREVIOUS / NONE / UNKNOWN all fall back
+     * to "换行" (both label and behavior).
+     */
+    private static boolean isSpecificSendOrdinal(int ord) {
+        return ord == 2 || ord == 3 || ord == 4 || ord == 8;
+    }
+
+    /** Per-action label, matched to AsrLongPressView's right-button text. */
+    private static String labelForEnterOrdinal(int ord, ClassLoader cl) {
+        switch (ord) {
+            case 2: return resolveDoubaoString(cl, RES_NAME_GO, FALLBACK_GO);
+            case 3: return resolveDoubaoString(cl, RES_NAME_SEARCH, FALLBACK_SEARCH);
+            case 4:
+            case 8: return resolveDoubaoString(cl, RES_NAME_SEND, FALLBACK_SEND);
+            default:
+                // NONE / NEXT / DONE / PREVIOUS / UNKNOWN all show 换行 to match
+                // what Doubao's space-long-press shows in the same editors.
+                return resolveDoubaoString(cl, RES_NAME_NEWLINE, TEXT_NEWLINE);
+        }
+    }
+
+    /** Per-action drawable name. SEND/GO/SEND_EXPRESSION share oic_send. */
+    private static String drawableNameForEnterOrdinal(int ord) {
+        switch (ord) {
+            case 2: return DRW_NAME_SEND;       // GO → use send icon (no go-specific)
+            case 3: return DRW_NAME_SEARCH;
+            case 4:
+            case 8: return DRW_NAME_SEND;
+            case 5: return DRW_NAME_NEXT;       // unused in current isSpecificSendOrdinal
+            case 6: return DRW_NAME_FINISH;     // unused
+            case 7: return DRW_NAME_PREVIOUS;   // unused
+            default: return DRW_NAME_ENTER;     // 换行
+        }
+    }
+
+    /**
+     * Resolves a Doubao dimen (in px) by name, falling back to the given dp
+     * value times density when unavailable.
+     */
+    private static int resolveDoubaoDimenPx(ClassLoader cl, String resName, int fallbackDp,
+                                            float density) {
+        try {
+            Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
+            Object ime = XposedHelpers.getStaticObjectField(jni, "mImeService");
+            if (ime != null) {
+                android.content.Context ctx = (android.content.Context)
+                        XposedHelpers.callMethod(ime, "getApplicationContext");
+                if (ctx != null) {
+                    android.content.res.Resources res = ctx.getResources();
+                    int id = res.getIdentifier(resName, "dimen", DOUBAO_PACKAGE);
+                    if (id != 0) {
+                        return res.getDimensionPixelSize(id);
+                    }
+                }
+            }
+        } catch (Throwable ignore) {
+        }
+        return (int) (fallbackDp * density);
+    }
+
+    /**
+     * Loads a Doubao drawable by name via {@code Context.createPackageContext}
+     * on the IME's context. Returns null if not found.
+     */
+    private static Drawable resolveDoubaoDrawable(ClassLoader cl, String resName) {
+        try {
+            Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
+            Object ime = XposedHelpers.getStaticObjectField(jni, "mImeService");
+            if (ime == null) return null;
+            android.content.Context ctx =
+                    (android.content.Context) XposedHelpers.callMethod(ime, "getApplicationContext");
+            if (ctx == null) return null;
+            android.content.res.Resources res = ctx.getResources();
+            int id = res.getIdentifier(resName, "drawable", DOUBAO_PACKAGE);
+            if (id == 0) return null;
+            if (Build.VERSION.SDK_INT >= 21) {
+                return res.getDrawable(id, null);
+            }
+            return res.getDrawable(id);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static String resolveDoubaoString(ClassLoader cl, String resName,
+                                              String fallback) {
+        // Best-effort: try to load the string from Doubao's resources via
+        // mImeService's context. Falls back to our hard-coded label.
+        try {
+            Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
+            Object ime = XposedHelpers.getStaticObjectField(jni, "mImeService");
+            if (ime == null) return fallback;
+            android.content.Context ctx =
+                    (android.content.Context) XposedHelpers.callMethod(ime, "getApplicationContext");
+            if (ctx == null) return fallback;
+            android.content.res.Resources res = ctx.getResources();
+            int id = res.getIdentifier(resName, "string", DOUBAO_PACKAGE);
+            if (id == 0) return fallback;
+            String s = res.getString(id);
+            return (s == null || s.isEmpty()) ? fallback : s;
+        } catch (Throwable t) {
+            return fallback;
+        }
+    }
+
+    // ===== Overlay UI =====
+
+    /**
+     * Lazily creates a TextView overlaying the toolbar area inside KeyboardView.
+     * Cheap to call repeatedly: returns the cached view if its parent is still
+     * the given kvView. Updates layout-height if the toolbar grew/shrank
+     * (translation mode transition).
+     */
+    /**
+     * Creates / re-attaches the overlay strip on the Doubao {@code InputView}.
+     * The strip spans the toolbar's full width with keyboard-row-style margins
+     * (4dp on all sides) and renders an icon + label in a single horizontal
+     * row, centered.
+     */
+    private static LinearLayout ensureOverlay(ClassLoader cl, int toolbarHeight) {
+        if (toolbarHeight <= 0) {
+            return null;
+        }
+        Object inputView = getInputView(cl);
+        ViewGroup parent = (inputView instanceof FrameLayout)
+                ? (FrameLayout) inputView : null;
+        if (parent == null) {
+            log("ensureOverlay: InputView not a FrameLayout, overlay skipped");
+            return null;
+        }
+        LinearLayout existing = sOverlay;
+        if (existing != null && existing.getParent() == parent) {
+            updateOverlayLayout(existing, toolbarHeight);
+            return existing;
+        }
+        if (existing != null) {
+            try {
+                ViewParent p = existing.getParent();
+                if (p instanceof ViewGroup) ((ViewGroup) p).removeView(existing);
+            } catch (Throwable ignore) {}
+        }
+        try {
+            float density = parent.getResources().getDisplayMetrics().density;
+            android.content.Context ctx = parent.getContext();
+
+            // Root: horizontal LinearLayout = icon + label in a single row.
+            LinearLayout root = new LinearLayout(ctx);
+            root.setOrientation(LinearLayout.HORIZONTAL);
+            root.setGravity(Gravity.CENTER);
+            root.setVisibility(View.VISIBLE);
+            root.setAlpha(0f);
+            root.setScaleX(SELECTION_SCALE_INITIAL);
+            root.setScaleY(SELECTION_SCALE_INITIAL);
+            root.setClickable(false);
+            root.setFocusable(false);
+            root.setEnabled(false);
+            root.setOnTouchListener((v, e) -> false);
+
+            GradientDrawable bg = new GradientDrawable();
+            bg.setShape(GradientDrawable.RECTANGLE);
+            bg.setCornerRadius(OVERLAY_CORNER_RADIUS_DP * density);
+            bg.setColor(COLOR_TRANSPARENT);
+            root.setBackground(bg);
+            sCurrentOverlayColor = COLOR_TRANSPARENT;
+
+            if (Build.VERSION.SDK_INT >= 21) {
+                root.setElevation(OVERLAY_ELEVATION_DP * density);
+            }
+
+            // Icon
+            ImageView icon = new ImageView(ctx);
+            int iconSize = (int) (OVERLAY_ICON_SIZE_DP * density);
+            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(
+                    iconSize, iconSize);
+            iconLp.gravity = Gravity.CENTER_VERTICAL;
+            iconLp.rightMargin = (int) (OVERLAY_ICON_TEXT_GAP_DP * density);
+            icon.setLayoutParams(iconLp);
+            icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            icon.setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN);
+            root.addView(icon);
+
+            // Label (same row as icon)
+            TextView label = new TextView(ctx);
+            label.setTextSize(OVERLAY_TEXT_SP);
+            label.setTextColor(Color.WHITE);
+            label.setGravity(Gravity.CENTER_VERTICAL);
+            label.setIncludeFontPadding(false);
+            label.setSingleLine(true);
+            try {
+                if (Build.VERSION.SDK_INT >= 28) {
+                    label.setTypeface(Typeface.create(Typeface.DEFAULT, 500, false));
+                } else {
+                    label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                }
+            } catch (Throwable ignore) {
+                label.setTypeface(Typeface.DEFAULT);
+            }
+            LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            labelLp.gravity = Gravity.CENTER_VERTICAL;
+            label.setLayoutParams(labelLp);
+            root.addView(label);
+
+            // Full-width strip; uniform margin sourced from Doubao's own
+            // candidate-container padding so it visually matches the spacing
+            // between candidate words and the toolbar boundary.
+            int margin = resolveDoubaoDimenPx(cl, DIMEN_NAME_OVERLAY_MARGIN,
+                    OVERLAY_MARGIN_FALLBACK_DP, density);
+            int stripHeight = Math.max(toolbarHeight - 2 * margin, toolbarHeight / 2);
+            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, stripHeight, Gravity.TOP);
+            flp.setMargins(margin, margin, margin, margin);
+            parent.addView(root, flp);
+
+            sOverlay = root;
+            sOverlayIcon = icon;
+            sOverlayLabel = label;
+            log("overlay attached toolbarH=" + toolbarHeight
+                    + " stripH=" + stripHeight + "px"
+                    + " margin=" + margin + "px (density=" + density + ")");
+            return root;
+        } catch (Throwable t) {
+            log("ERR ensureOverlay: " + t.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /** Re-applies layout params if the toolbar height changed. */
+    private static void updateOverlayLayout(LinearLayout overlay, int toolbarHeight) {
+        try {
+            float density = overlay.getResources().getDisplayMetrics().density;
+            ClassLoader cl = overlay.getContext().getClassLoader();
+            int margin = resolveDoubaoDimenPx(cl, DIMEN_NAME_OVERLAY_MARGIN,
+                    OVERLAY_MARGIN_FALLBACK_DP, density);
+            int newH = Math.max(toolbarHeight - 2 * margin, toolbarHeight / 2);
+            ViewGroup.LayoutParams lp = overlay.getLayoutParams();
+            if (lp != null && lp.height != newH) {
+                lp.height = newH;
+                overlay.setLayoutParams(lp);
+            }
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private static void updateOverlayForZone(Zone zone, int enterOrdinal, ClassLoader cl) {
+        final LinearLayout tv = sOverlay;
+        if (tv == null) {
+            return;
+        }
+        Runnable update = () -> applyOverlayState(tv, zone, enterOrdinal, cl);
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            update.run();
+        } else {
+            tv.post(update);
+        }
+    }
+
+    private static void applyOverlayState(LinearLayout tv, Zone zone, int enterOrdinal,
+                                          ClassLoader cl) {
+        if (zone == Zone.LETTER) {
+            tv.animate()
+                    .alpha(0f)
+                    .scaleX(SELECTION_SCALE_INITIAL).scaleY(SELECTION_SCALE_INITIAL)
+                    .setDuration(HIDE_ANIM_MS)
+                    .start();
+            setOverlayBackgroundColor(tv, COLOR_TRANSPARENT, true);
+            return;
+        }
+        String text;
+        String drawableName;
+        int targetColor;
+        if (zone == Zone.OUTSIDE) {
+            // Match AsrNotchedEllipseView's hardcoded "撤回输入" (the
+            // asr_long_press_rollback_text resource is actually "松手 撤回",
+            // the hover-hint subtitle, not the main label).
+            text = TEXT_CANCEL;
+            drawableName = DRW_NAME_CANCEL;
+            targetColor = COLOR_CANCEL;
+        } else {
+            text = labelForEnterOrdinal(enterOrdinal, cl);
+            drawableName = drawableNameForEnterOrdinal(enterOrdinal);
+            targetColor = COLOR_SEND;
+        }
+        TextView label = sOverlayLabel;
+        if (label != null) {
+            label.setText(text);
+        }
+        ImageView icon = sOverlayIcon;
+        if (icon != null) {
+            Drawable d = resolveDoubaoDrawable(cl, drawableName);
+            if (d != null) {
+                icon.setImageDrawable(d);
+                icon.setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN);
+                icon.setVisibility(View.VISIBLE);
+            } else {
+                // No icon → still show text by hiding the missing image slot.
+                icon.setImageDrawable(null);
+                icon.setVisibility(View.GONE);
+            }
+        }
+        setOverlayBackgroundColor(tv, targetColor, false);
+        tv.animate()
+                .alpha(1f)
+                .scaleX(SELECTION_SCALE).scaleY(SELECTION_SCALE)
+                .setInterpolator(new OvershootInterpolator(1.5f))
+                .setDuration(SELECTION_ANIM_MS)
+                .start();
+    }
+
+    /**
+     * @param snapInsteadOfAnimate if true, sets color directly (used for the
+     *                              hide-out path); else interpolates via
+     *                              {@link ArgbEvaluator}.
+     */
+    private static void setOverlayBackgroundColor(View tv, int targetColor,
+                                                  boolean snapInsteadOfAnimate) {
+        Drawable bg = tv.getBackground();
+        if (!(bg instanceof GradientDrawable)) {
+            tv.setBackgroundColor(targetColor);
+            sCurrentOverlayColor = targetColor;
+            return;
+        }
+        GradientDrawable gd = (GradientDrawable) bg;
+        int from = sCurrentOverlayColor;
+        if (from == targetColor) {
+            return;
+        }
+        ValueAnimator prev = sColorAnimator;
+        if (prev != null && prev.isRunning()) {
+            prev.cancel();
+        }
+        if (snapInsteadOfAnimate) {
+            gd.setColor(targetColor);
+            sCurrentOverlayColor = targetColor;
+            sColorAnimator = null;
+            return;
+        }
+        ValueAnimator anim = ValueAnimator.ofObject(new ArgbEvaluator(), from, targetColor);
+        anim.setDuration(SELECTION_ANIM_MS);
+        anim.addUpdateListener(va -> {
+            int c = (int) va.getAnimatedValue();
+            gd.setColor(c);
+            sCurrentOverlayColor = c;
+        });
+        sColorAnimator = anim;
+        anim.start();
     }
 
     private static String safeText(String text) {

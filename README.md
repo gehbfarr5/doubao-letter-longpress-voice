@@ -4,9 +4,9 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![GitHub release](https://img.shields.io/github/v/release/gehbfarr5/doubao-letter-longpress-voice)](../../releases/latest)
 
-一个 LSPosed 模块：**长按豆包输入法 26 键 / 9 宫格字母键触发语音输入**，按住录音、原地松手上屏、上滑取消。
+一个 LSPosed 模块：**长按豆包输入法 26 键 / 9 宫格字母键触发语音输入**，按住录音、原地松手上屏、滑到工具栏发送/换行、上滑取消。
 
-> A LSPosed module that lets you long-press any letter key in Doubao IME to start voice input — like the toolbar mic button, but from any letter. Hold to record, release to commit, swipe out to cancel.
+> A LSPosed module that lets you long-press any letter key in Doubao IME to start voice input — like the toolbar mic button, but from any letter. Hold to record, release in place to commit, slide to toolbar to send/newline, slide out to cancel.
 
 <p align="center">
   <img src="docs/media/demo.gif" alt="演示：长按字母键触发语音 + 滑出取消" width="320">
@@ -20,10 +20,16 @@
 ## ✨ 特性
 
 - **长按任意字母键 (~500ms) 触发语音**，沿用豆包内部 `LONG_PRESS_TIMEOUT` 时长，体感跟原生空格长按一致
-- **Press-and-hold 录音 / 原地松手上屏 / 滑出键盘取消**（自实现 cancel 路径，因为豆包 toolbar 语音入口本身无 cancel API）
+- **Press-and-hold 录音 / 原地松手上屏 / 滑到工具栏发送-换行 / 滑出键盘撤回输入**（多手势在录音过程中实时识别）
+- **跟随当前输入框 `EnterActionType` 显示语义化标签**：发送 / 搜索 / 前往 / 换行 / 完成 — 与豆包空格长按弹出的"右侧按钮"保持一致
+- **滑到工具栏 → 真正执行对应动作**：
+  - `GO / SEARCH / SEND / SEND_EXPRESSION` 走 `AsrManager.t(ordinal, now)`（等 ASR 整理结果后再触发，跟豆包空格长按发送同路径）
+  - `NEXT / DONE / PREVIOUS / NONE` 走快路径（`p0(false,"") + KEYCODE_ENTER`），换行响应在 200ms 内
+- **滑出键盘 → 撤回输入**：清掉 preedit + 抑制所有 ASR commit 1.2s
+- **图标徽章 UI**：横向 LinearLayout，复用豆包自家 `oic_send` / `oic_search` / `oic_enter` 图标 + `ic_delete_white`（豆包退格上滑清空那个垃圾桶），间距从豆包候选框 padding 资源动态读取，跟豆包视觉风格一致
 - **跟随豆包"按键震动"设置**，复用 `UserInteractiveManagerNext.g(.., SPEECH_START, ..)` 调用链
 - **修复了按键残留高亮**，触发时补发 `nativeTouch(ACTION_CANCEL)` 让 native 立刻清掉 pressed 状态
-- **commit 走 `AsrManager.p0(false, "")`**（与豆包语音面板内的停止按钮同一路径），让 ASR 引擎走自然 finalize 流程：尾字不丢、标点自动添加、同音字纠正
+- **commit 走 `AsrManager.q0()` / `p0(false, "")`**（与豆包语音面板内的停止按钮同一路径），让 ASR 引擎走自然 finalize 流程：尾字不丢、标点自动添加、同音字纠正
 - **滑动手势识别**（20dp 阈值，按设备 density 自适应），左右滑动光标移动手势不会误触发语音
 - **不破坏原生长按 popup**：数字/符号子层、Shift、Backspace、空格 等的原生长按行为完全保留
 - **防御性多层门槛**：数字/电话/日期输入框 → 跳过；`?123` 数字/符号子层 → 跳过；浮动/单手模式 → 跳过；几何不在字母区 → 跳过
@@ -56,12 +62,13 @@
 | 动作 | 效果 |
 |---|---|
 | 长按字母键 500ms | 启动语音 + 震动 + 按键阴影立刻清除 |
-| 录音中**原地松手** | 上屏（带尾音 + 标点 + 引擎级整理） |
-| 录音中**向上/外滑出键盘范围**再松手 | 取消：清掉 preedit + 抑制所有 ASR commit 1.2 s |
+| 录音中**原地松手**（手指仍在键盘字母区） | 上屏（带尾音 + 标点 + 引擎级整理） |
+| 录音中**手指滑到工具栏**再松手 | 按当前输入框语义触发对应动作（发送/搜索/前往/换行/完成…），文字 + 图标徽章实时显示选中状态 |
+| 录音中**手指滑出键盘范围**（上/下）再松手 | 撤回输入：清掉 preedit + 抑制所有 ASR commit 1.2 s，红底垃圾桶徽章实时显示 |
 | 长按 Shift / Backspace / 空格 | **不触发本模块**，保留原生长按行为 |
 | 切到数字层 (`?123`) 长按数字 | **不触发本模块**，保留原生长按 popup |
 | 在真·数字输入框（手机号/验证码/金额） | **不触发本模块**，保留原生数字键盘体验 |
-| 长按后水平/垂直滑动 | **不触发本模块**，保留豆包原生光标移动 / 上划符号 |
+| 长按后水平/垂直滑动（未触发语音前） | **不触发本模块**，保留豆包原生光标移动 / 上划符号 |
 
 ## 🛠 自行构建
 
@@ -81,10 +88,13 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 我们 hook `KeyboardView$c.handleMessage(Message)`：在所有门槛通过后**吞掉原 dispatch** (`param.setResult(null)`)，改调 `KeyboardJni.DoFunctionKey(6)` 启动 ASR。
 
-### Hook 2：吞松手 + commit / cancel 决策
-在 `KeyboardView.onTouchEvent` 中标记 `sSuppressNextUp`，吞掉 `ACTION_UP / ACTION_CANCEL`，避免 native 把字母 commit 上屏。同时根据松手坐标决策：
-- 在 KeyboardView 范围内 → 调 `AsrManager.p0(false, "")` —— **复用豆包语音面板停止按钮的路径**，让引擎走自然 finalize（尾字、标点、同音字纠正都在这里）
-- 超出范围（任意方向）或 `ACTION_CANCEL` → 走自定义 cancel 抑制窗口
+### Hook 2：吞松手 + 三路 zone 决策
+在 `KeyboardView.onTouchEvent` 中标记 `sSuppressNextUp`，吞掉 `ACTION_UP / ACTION_CANCEL`，避免 native 把字母 commit 上屏。录音过程中根据手指 Y 坐标实时分三个 zone（带 50ms 防抖），松手后按当前 zone 决策：
+- **LETTER**（字母区内）→ `AsrManager.q0()`（带 150ms postDelayed → `p0(false,"")`），与豆包语音面板停止按钮同路径
+- **TOOLBAR**（工具栏区域）→ 按 `EnterActionType`：
+  - GO / SEARCH / SEND / SEND_EXPRESSION → `AsrManager.t(ordinal, now)`（等 ASR 整理结果再 perform action，跟豆包空格长按发送同路径）
+  - 其余（换行类）→ `p0(false,"") + 200ms postDelayed + KEYCODE_ENTER`（快路径，避免等 ASR 结果包）
+- **OUTSIDE**（键盘上/下方滑出）或 `ACTION_CANCEL` → 走自定义 cancel 抑制窗口
 
 ### Hook 3：cancel 抑制窗口
 豆包 toolbar press-and-hold 模式 (`case 6/7`) **没有真正的 cancel API**。我们的策略：
@@ -98,6 +108,13 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ### Hook 4：IME 生命周期防御
 Hook `ImeService.onFinishInput()` 和 `onFinishInputView(boolean)` 清掉所有 per-session 状态，避免 `sSuppressNextUp` / cancel 窗口跨 input session 泄漏。
+
+### Hook 5：徽章 overlay
+触发 ASR 后，向豆包 `InputView` (FrameLayout) attach 一个横向 LinearLayout（ImageView + TextView）作为 zone 反馈徽章：
+- 工具栏全宽，圆角 8dp，上下左右间距读取豆包 `asr_editor_candidate_container_padding_horizontal`（候选条 padding，视觉对齐）
+- 图标资源走豆包自家 `oic_send` / `oic_search` / `oic_enter` / `ic_delete_white`，统一白色 `PorterDuff.SRC_IN` 着色
+- 标签文字从豆包 `asr_long_press_send_text` / `search_text` / `go_text` / `enter_text` 等资源动态读取，确保跟豆包空格长按弹出的右侧按钮一致
+- zone 切换时 ArgbEvaluator 平滑 180ms 颜色过渡 + OvershootInterpolator scale 1.04 微缩放，松手或离开徽章区域时 120ms 渐隐
 
 ### 关键避坑
 - `UserInteractiveManagerNext.a` / `AsrManager.a` 的 `<clinit>` 链会触碰 `IAppGlobals`，需要 `sApplication` 已初始化。**绝不能在 `handleLoadPackage` 时访问**，否则 `<clinit>` 失败被永久标记 errored，整个豆包进程起不来。所有 Doubao 单例都走 `ensureXxx()` 懒加载。
