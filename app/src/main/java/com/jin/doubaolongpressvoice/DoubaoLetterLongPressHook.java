@@ -124,6 +124,30 @@ public final class DoubaoLetterLongPressHook {
     private static final long COMMIT_TAIL_DELAY_MS = 600L;     // fallback path only
     private static final long ASR_START_VERIFY_DELAY_MS = 80L;
     private static final long NEWLINE_KEY_DELAY_MS = 200L;     // wait after p0() before sending ENTER
+    /**
+     * v1.2.0: Force-send package list — apps whose chat EditText DOES respond to
+     * {@code IME_ACTION_SEND} via OnEditorActionListener, but whose declared
+     * imeOptions/inputType make Doubao misclassify the editor as newline-class.
+     *
+     * Source for Nekogram entry: ChatActivityEnterView line 5717-5732
+     * (https://github.com/Nekogram/Nekogram, main branch).
+     *
+     * When detected enterActionType is non-specific AND current editor's package
+     * is in this set, override the dispatch ordinal to IME_ACTION_SEND so
+     * AsrManager.t(...) routes through InputConnection.performEditorAction
+     * (IME_ACTION_SEND) — which the App's registered listener catches and treats
+     * as "send message".
+     *
+     * Adding a new app requires (1) confirming via source/runtime that its
+     * OnEditorActionListener unconditionally responds to IME_ACTION_SEND,
+     * (2) appending its package name here, (3) bumping minor version.
+     * See orchestra/ADAPT-PLAYBOOK.md for the full adaptation flow.
+     */
+    private static final java.util.Set<String> FORCE_SEND_PACKAGES =
+            java.util.Collections.singleton("tw.nekomimi.nekogram");
+
+    /** {@code EditorInfo.IME_ACTION_SEND} ordinal — used for force-send override. */
+    private static final int IME_ACTION_SEND_ORDINAL = 4;
 
     // Zone-tracking constants for in-recording slide-to-action.
     private static final long ZONE_DEBOUNCE_MS = 50L;
@@ -611,7 +635,7 @@ public final class DoubaoLetterLongPressHook {
         Object inputView = getInputView(cl);
         callInputViewR(inputView, false);
 
-        int enterOrdinal = resolveEnterOrdinal(cl);
+        int enterOrdinal = resolveEffectiveEnterOrdinal(cl);
         if (enterOrdinal < 0) {
             enterOrdinal = 1;
         }
@@ -973,6 +997,28 @@ public final class DoubaoLetterLongPressHook {
         }
     }
 
+    /**
+     * Reads the current editor's package name via the IME service. Returns null
+     * on any failure (no service, no editor info, missing field) — callers must
+     * treat null as "not in any whitelist".
+     */
+    private static String currentEditorPackageName(ClassLoader cl) {
+        try {
+            Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
+            Object ime = XposedHelpers.getStaticObjectField(jni, "mImeService");
+            if (ime == null) {
+                return null;
+            }
+            Object ei = XposedHelpers.callMethod(ime, "getCurrentInputEditorInfo");
+            if (!(ei instanceof EditorInfo)) {
+                return null;
+            }
+            return ((EditorInfo) ei).packageName;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     private static boolean isNonTextInputClass(int inputClass) {
         return inputClass == InputType.TYPE_CLASS_NUMBER
                 || inputClass == InputType.TYPE_CLASS_PHONE
@@ -1095,7 +1141,7 @@ public final class DoubaoLetterLongPressHook {
         sLastZoneChangeTs = now;
         // Make sure overlay exists (may be detached after lifecycle reset).
         ensureOverlay(cl, tbH);
-        int enterOrdinal = resolveEnterOrdinal(cl);
+        int enterOrdinal = resolveEffectiveEnterOrdinal(cl);
         updateOverlayForZone(next, enterOrdinal, cl);
         if (next == Zone.TOOLBAR || next == Zone.OUTSIDE) {
             performZoneSelectionFeedback();
@@ -1174,6 +1220,37 @@ public final class DoubaoLetterLongPressHook {
         }
         // None specific — pick the highest non-negative for diagnostic clarity.
         return Math.max(0, Math.max(fromEditorViewInfo, Math.max(fromEnterType, fromRawLow)));
+    }
+
+    /**
+     * Returns the ordinal Doubao should use for BOTH dispatch AND UI label/icon.
+     *
+     * Layered judgement:
+     * <ol>
+     *   <li>If {@link #resolveEnterOrdinal} detected a specific send action
+     *       (GO/SEARCH/SEND/SEND_EXPRESSION), trust it — no override.</li>
+     *   <li>Else if current editor's package is in {@link #FORCE_SEND_PACKAGES},
+     *       override to {@link #IME_ACTION_SEND_ORDINAL} so the App's listener
+     *       receives the semantic send command.</li>
+     *   <li>Else return the original (newline-class) ordinal unchanged.</li>
+     * </ol>
+     *
+     * Used by both {@link #commitAndDispatchToolbarAction} and
+     * {@link #maybeUpdateZone} so the overlay label NEVER says "换行" while
+     * behavior is actually "send".
+     */
+    private static int resolveEffectiveEnterOrdinal(ClassLoader cl) {
+        int ord = resolveEnterOrdinal(cl);
+        if (isSpecificSendOrdinal(ord)) {
+            return ord;
+        }
+        String pkg = currentEditorPackageName(cl);
+        if (pkg != null && FORCE_SEND_PACKAGES.contains(pkg)) {
+            log("force-send override: pkg=" + pkg + " original ord=" + ord
+                    + " -> IME_ACTION_SEND");
+            return IME_ACTION_SEND_ORDINAL;
+        }
+        return ord;
     }
 
     private static int readEnterTypeOrdinal(ClassLoader cl) {
