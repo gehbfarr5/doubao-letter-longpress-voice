@@ -22,7 +22,7 @@
 
 ### 后续可做（post-v1.4.0 backlog）
 
-1. **引导 Activity**：一键跳「设置→无障碍」+ 服务启用状态提示（当前需用户手动进设置；reinstall 后无障碍可能被系统解绑需重开）。
+1. ~~**引导 Activity**~~ ❌ 已否决（2026-06-17）：v1.4.1 试做过 launcher `SetupActivity`（状态显示 + 一键跳无障碍设置），但用户觉得不如原生设置直接、且希望**应用存在感更低**（不要 launcher 图标）。已删 release+tag、main reset 回 v1.4.0。无障碍启用说明**只在 README 提及**，不做应用内引导。
 2. **扩展更多应用**：Gemini / Grok / 其它聊天类 App，复用同一 a11y 服务 + 补选择器。靠 logcat dump 勘探节点。
 3. **选择器健壮化**：当前是启发式（含 send/发送 + 可点击）。可加 per-package resource-id 精确匹配作为首选、启发式兜底。
 4. **`DOUBAO-INTERNALS.md`**：沉淀 Claude/ChatGPT（及豆包自身）节点结构与 hook 点，作为后续 feature reference（呼应 #3 勘探精神）。
