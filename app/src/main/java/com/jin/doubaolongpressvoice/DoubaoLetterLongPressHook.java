@@ -123,7 +123,21 @@ public final class DoubaoLetterLongPressHook {
     private static final long CANCEL_WINDOW_MS = 1200L;
     private static final long COMMIT_TAIL_DELAY_MS = 600L;     // fallback path only
     private static final long ASR_START_VERIFY_DELAY_MS = 80L;
-    private static final long NEWLINE_KEY_DELAY_MS = 200L;     // wait after p0() before sending ENTER
+    /**
+     * Newline-path ASR-settle parameters. Instead of a fixed delay before
+     * dispatching KEYCODE_ENTER (which races with Doubao's async ASR polish
+     * and causes the polished text to be committed twice — once by p0() and
+     * again by the IME framework's auto-finishComposingText at ENTER), we
+     * poll for Doubao's ASR callbacks ({@code onAsrSetPreedit},
+     * {@code onAsrCommitPreeditText}) to go quiet, then fire ENTER.
+     *
+     * Two-phase: (1) wait for first ASR callback after dispatch (so short
+     * text doesn't fire ENTER before ASR even responds), (2) wait for
+     * {@code NEWLINE_ASR_SETTLE_MS} of post-callback silence.
+     */
+    private static final long NEWLINE_ASR_POLL_MS = 50L;        // poll interval
+    private static final long NEWLINE_ASR_SETTLE_MS = 100L;     // quiet window before ENTER
+    private static final long NEWLINE_ASR_MAX_WAIT_MS = 2000L;  // overall cap
     /**
      * v1.2.0: Force-send package list — apps whose chat EditText DOES respond to
      * {@code IME_ACTION_SEND} via OnEditorActionListener, but whose declared
@@ -251,6 +265,8 @@ public final class DoubaoLetterLongPressHook {
 
     // --- volatile per-session state ---
     private static volatile long sCancelUntilElapsed = 0L;
+    /** Last time onAsrSetPreedit / onAsrCommitPreeditText fired — used by mode-8 ASR-settle poll. */
+    private static volatile long sLastAsrCallbackTs = 0L;
     private static volatile boolean sSuppressNextUp = false;
     private static volatile float sDownX;
     private static volatile float sDownY;
@@ -519,7 +535,9 @@ public final class DoubaoLetterLongPressHook {
                             if (isInCancelWindow()) {
                                 log("onAsrCommitPreeditText SWALLOWED");
                                 param.setResult(Boolean.TRUE);
+                                return;
                             }
+                            sLastAsrCallbackTs = SystemClock.elapsedRealtime();
                         }
                     });
             log("hooked " + KEYBOARD_JNI + "#onAsrCommitPreeditText");
@@ -536,7 +554,9 @@ public final class DoubaoLetterLongPressHook {
                                 log("onAsrSetPreedit SWALLOWED text="
                                         + safeText((String) param.args[0]));
                                 param.setResult(Boolean.TRUE);
+                                return;
                             }
+                            sLastAsrCallbackTs = SystemClock.elapsedRealtime();
                         }
                     });
             log("hooked " + KEYBOARD_JNI + "#onAsrSetPreedit");
@@ -673,21 +693,83 @@ public final class DoubaoLetterLongPressHook {
     }
 
     /**
-     * Newline-fast path: commit ASR text via p0(false,"") and post-delay an
-     * ENTER key event so the newline lands after the committed text without
-     * blocking on {@code t()}'s wait-for-asr-back flow.
+     * Newline-fast path: commit ASR text via {@code p0(false,"")} and dispatch
+     * a {@code KEYCODE_ENTER} key event once Doubao's ASR pipeline has
+     * actually finished finalizing.
+     *
+     * <p><b>v1.3.0:</b> the naive "fixed delay between p0 and ENTER" approach
+     * raced with Doubao's async ASR polish — the polished text would be
+     * committed once by p0 and again by IME-framework auto-finishComposingText
+     * when ENTER dispatched (especially on long text where polish takes longer).
+     * We now poll {@link #sLastAsrCallbackTs} (updated by Doubao's own
+     * {@code onAsrSetPreedit}/{@code onAsrCommitPreeditText} hooks) and only
+     * fire ENTER after callbacks have been quiet for
+     * {@link #NEWLINE_ASR_SETTLE_MS}. Adaptive: short text fires fast, long
+     * text waits longer. See {@link #pollAsrSettleAndEnter}.
      */
     private static void dispatchNewlineFast(final ClassLoader cl) {
         Object mgr = ensureAsrManager(cl);
         if (mgr != null) {
             try {
                 XposedHelpers.callMethod(mgr, "p0", false, "");
-                log("p0(false,\"\") fired (newline path, fast)");
+                log("p0(false,\"\") fired (newline path)");
             } catch (Throwable e) {
                 log("ERR p0(): " + e.getClass().getSimpleName());
             }
         }
-        sMainHandler.postDelayed(() -> sendEnterKey(cl), NEWLINE_KEY_DELAY_MS);
+        pollAsrSettleAndEnter(cl,
+                NEWLINE_ASR_SETTLE_MS,
+                NEWLINE_ASR_MAX_WAIT_MS,
+                SystemClock.elapsedRealtime());
+    }
+
+    /**
+     * Two-phase poll for ASR settle.
+     * <ol>
+     *   <li>Phase 1 — wait until at least one ASR callback fires AFTER
+     *       dispatch start ({@code sLastAsrCallbackTs > startTs}). This
+     *       confirms Doubao has actually responded to our {@code p0()}
+     *       trigger; without it, short text could fire ENTER before ASR
+     *       even commits, producing "ENTER then text" out-of-order
+     *       insertion.</li>
+     *   <li>Phase 2 — wait until callbacks go quiet for {@code settleMs},
+     *       meaning ASR has truly finished finalizing.</li>
+     * </ol>
+     * Re-schedules itself every {@link #NEWLINE_ASR_POLL_MS}. Capped at
+     * {@code maxWaitMs} as a timeout fallback so we never hang.
+     */
+    private static void pollAsrSettleAndEnter(final ClassLoader cl,
+                                              final long settleMs,
+                                              final long maxWaitMs,
+                                              final long startTs) {
+        sMainHandler.postDelayed(() -> {
+            long now = SystemClock.elapsedRealtime();
+            long waited = now - startTs;
+            boolean asrRespondedAfterDispatch = sLastAsrCallbackTs > startTs;
+
+            if (waited >= maxWaitMs) {
+                log("asr-settle TIMEOUT waited=" + waited
+                        + "ms responded=" + asrRespondedAfterDispatch
+                        + " -> ENTER anyway");
+                sendEnterKey(cl);
+                return;
+            }
+
+            if (!asrRespondedAfterDispatch) {
+                // Phase 1: still waiting for first post-dispatch ASR callback
+                pollAsrSettleAndEnter(cl, settleMs, maxWaitMs, startTs);
+                return;
+            }
+
+            // Phase 2: ASR has responded — measure quiet time since last callback
+            long quiet = now - sLastAsrCallbackTs;
+            if (quiet >= settleMs) {
+                log("asr-settle quiet=" + quiet + "ms waited=" + waited + "ms -> ENTER");
+                sendEnterKey(cl);
+            } else {
+                pollAsrSettleAndEnter(cl, settleMs, maxWaitMs, startTs);
+            }
+        }, NEWLINE_ASR_POLL_MS);
     }
 
     /** Sends KEYCODE_ENTER (66) via {@code InputMethodService.sendDownUpKeyEvents}. */
