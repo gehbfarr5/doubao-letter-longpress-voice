@@ -22,8 +22,18 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
     public static final String EXTRA_TARGET_PKG = "target_pkg";
 
     private static final String TAG = "DoubaoVoiceSend";
-    private static final int MAX_DUMP_DEPTH = 10;
-    private static final int MAX_DUMP_NODES = 80;
+    private static final int MAX_DUMP_DEPTH = 25;
+    private static final int MAX_DUMP_NODES = 200;
+
+    /**
+     * Send-button keywords matched against contentDescription / text
+     * (case-insensitive substring). Includes Chinese because Claude/ChatGPT
+     * localize their button labels, and Compose/WebView nodes commonly carry
+     * a localized contentDescription rather than English "send".
+     */
+    private static final String[] SEND_KEYWORDS = {
+            "send", "发送", "提交", "发送消息", "send message", "send prompt"
+    };
 
     private BroadcastReceiver mReceiver;
     private boolean mReceiverRegistered;
@@ -173,18 +183,22 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
             if (!containsSend(node.getContentDescription()) && !containsSend(node.getText())) {
                 return false;
             }
-            return node.isClickable() || nearestClickable(node) != null;
+            // Compose/WebView send buttons frequently report isClickable()==false
+            // while still exposing ACTION_CLICK as a semantic action. Accept the
+            // node if it (or an ancestor) is actionable in either sense.
+            return supportsClick(node) || nearestClickable(node) != null;
         } catch (Throwable t) {
             Log.w(TAG, "ERR matchesSend: " + t.getClass().getSimpleName());
             return false;
         }
     }
 
+    /** Walks up to the nearest ancestor that can receive an ACTION_CLICK. */
     private AccessibilityNodeInfo nearestClickable(AccessibilityNodeInfo node) {
         AccessibilityNodeInfo cur = node;
         while (cur != null) {
             try {
-                if (cur.isClickable()) {
+                if (supportsClick(cur)) {
                     return cur;
                 }
                 cur = cur.getParent();
@@ -196,8 +210,44 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
         return null;
     }
 
+    /**
+     * True if the node accepts a click — either the classic {@code isClickable()}
+     * flag (View-based / WebView) or an {@code ACTION_CLICK} entry in its action
+     * list (Jetpack Compose exposes semantic actions this way).
+     */
+    private boolean supportsClick(AccessibilityNodeInfo node) {
+        try {
+            if (node == null) {
+                return false;
+            }
+            if (node.isClickable()) {
+                return true;
+            }
+            java.util.List<AccessibilityNodeInfo.AccessibilityAction> actions = node.getActionList();
+            if (actions != null) {
+                for (AccessibilityNodeInfo.AccessibilityAction a : actions) {
+                    if (a != null && a.getId() == AccessibilityNodeInfo.ACTION_CLICK) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "ERR supportsClick: " + t.getClass().getSimpleName());
+        }
+        return false;
+    }
+
     private boolean containsSend(CharSequence value) {
-        return value != null && value.toString().toLowerCase(java.util.Locale.US).contains("send");
+        if (value == null) {
+            return false;
+        }
+        String lower = value.toString().toLowerCase(java.util.Locale.US);
+        for (String kw : SEND_KEYWORDS) {
+            if (lower.contains(kw)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void dumpClickables(AccessibilityNodeInfo root) {
@@ -214,13 +264,23 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
             if (node == null || depth > MAX_DUMP_DEPTH || count[0] >= MAX_DUMP_NODES) {
                 return;
             }
-            if (node.isClickable()) {
+            // Dump anything actionable OR carrying a label — a Compose send button
+            // may not be isClickable() yet still be the node we want, so logging
+            // only isClickable() nodes (the old behavior) printed nothing.
+            boolean actionable = supportsClick(node);
+            CharSequence text = node.getText();
+            CharSequence desc = node.getContentDescription();
+            boolean hasLabel = (text != null && text.length() > 0)
+                    || (desc != null && desc.length() > 0);
+            if (actionable || hasLabel) {
                 Rect bounds = new Rect();
                 node.getBoundsInScreen(bounds);
-                Log.i(TAG, "clickable[" + count[0] + "] "
-                        + "viewIdResourceName=" + safeViewId(node)
-                        + " | text=" + safeText(node.getText())
-                        + " | desc=" + safeText(node.getContentDescription())
+                Log.i(TAG, "node[" + count[0] + "] depth=" + depth
+                        + " clickable=" + node.isClickable()
+                        + " actionClick=" + actionable
+                        + " | viewId=" + safeViewId(node)
+                        + " | text=" + safeText(text)
+                        + " | desc=" + safeText(desc)
                         + " | class=" + safeText(node.getClassName())
                         + " | bounds=" + bounds);
                 count[0]++;

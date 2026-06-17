@@ -1388,8 +1388,13 @@ public final class DoubaoLetterLongPressHook {
             return ord;
         }
         String pkg = currentEditorPackageName(cl);
-        if (pkg != null && FORCE_SEND_PACKAGES.contains(pkg)) {
-            log("force-send override: pkg=" + pkg + " original ord=" + ord
+        // FORCE_SEND packages dispatch IME_ACTION_SEND; A11Y_SEND packages send
+        // via the AccessibilityService. Both are semantically "send", so the
+        // overlay label/icon must read 发送, not 换行 — even though the editor
+        // only reports a newline-class ordinal.
+        if (pkg != null && (FORCE_SEND_PACKAGES.contains(pkg)
+                || A11Y_SEND_PACKAGES.contains(pkg))) {
+            log("send-label override: pkg=" + pkg + " original ord=" + ord
                     + " -> IME_ACTION_SEND");
             return IME_ACTION_SEND_ORDINAL;
         }
