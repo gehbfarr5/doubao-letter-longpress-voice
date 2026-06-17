@@ -4,7 +4,27 @@
 
 ---
 
-## #1 — Claude App 适配（v1.4.0 主线）
+## #1 — Claude App 适配（v1.4.0 主线）✅ 已发布 (2026-06-17, 7293b9e)
+
+**实现**：`DoubaoVoiceSendA11yService` + hook 端 `A11Y_SEND_PACKAGES` 分支。已过独立 Verifier（build+grep）。
+**待真机**：选择器是 best-guess（desc/text 含 "send"）。首测大概率走自探针 dump → 按 logcat 回填真值（见下方「#0 真机收尾」）。
+
+---
+
+### #0 — v1.4.1 真机收尾（最高优先，阻塞 v1.4.0 真正可用）
+
+1. 装 v1.4.0 APK → 设置→无障碍 启用「豆包语音发送助手」。
+2. 在 Claude / ChatGPT 里长按字母键语音输入 → 上滑到发送区松手。
+3. `adb logcat | grep DoubaoVoiceSend`：
+   - 命中 → 成功，记录实际节点。
+   - 未命中 → 读 dump 出的 clickable 节点（id/text/desc/class/bounds），把真值写进 `DoubaoVoiceSendA11yService` 的 SELECTORS。
+4. 顺手把 Claude/ChatGPT 发送按钮节点结构记到 `DOUBAO-INTERNALS.md`（呼应 #3 勘探精神）。
+
+后续可加：引导 Activity（一键跳无障碍设置 + 状态提示），目前需用户手动进设置。
+
+---
+
+### #1 原始分析（保留作参考）
 
 **状态**：v1.3.0 A 实验已确认 IME 层路径全部失效：
 - `performEditorAction(IME_ACTION_SEND)`（v1.2.0 force-send 路径）→ Claude WebView 桥接到 commit，**不触发 send**
@@ -25,7 +45,9 @@
 
 ---
 
-## #2 — ChatGPT App 适配（同 v1.4.0，跟 #1 共用 a11y 基础设施）
+## #2 — ChatGPT App 适配（同 v1.4.0，跟 #1 共用 a11y 基础设施）✅ 已发布 (2026-06-17)
+
+已随 v1.4.0 一起：`A11Y_SEND_PACKAGES` 含 `com.openai.chatgpt`，复用同一 a11y 服务。选择器同样待真机收尾（见 #0）。
 
 **复用 #1 的 Accessibility Service**，只加 ChatGPT 的节点选择器配置。
 
