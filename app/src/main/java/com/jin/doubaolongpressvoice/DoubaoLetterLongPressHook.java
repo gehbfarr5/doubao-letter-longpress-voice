@@ -159,6 +159,10 @@ public final class DoubaoLetterLongPressHook {
      */
     private static final java.util.Set<String> FORCE_SEND_PACKAGES =
             java.util.Collections.singleton("tw.nekomimi.nekogram");
+    private static final java.util.Set<String> A11Y_SEND_PACKAGES =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "com.anthropic.claude",
+                    "com.openai.chatgpt"));
 
     /** {@code EditorInfo.IME_ACTION_SEND} ordinal — used for force-send override. */
     private static final int IME_ACTION_SEND_ORDINAL = 4;
@@ -655,6 +659,12 @@ public final class DoubaoLetterLongPressHook {
         Object inputView = getInputView(cl);
         callInputViewR(inputView, false);
 
+        String pkg = currentEditorPackageName(cl);
+        if (pkg != null && A11Y_SEND_PACKAGES.contains(pkg)) {
+            dispatchViaA11ySend(cl, pkg);
+            return;
+        }
+
         int enterOrdinal = resolveEffectiveEnterOrdinal(cl);
         if (enterOrdinal < 0) {
             enterOrdinal = 1;
@@ -668,6 +678,28 @@ public final class DoubaoLetterLongPressHook {
         } else {
             dispatchNewlineFast(cl);
         }
+    }
+
+    /**
+     * Accessibility-send path: commit ASR text, wait for Doubao's async ASR
+     * finalization to settle, then ask our AccessibilityService to click the
+     * target app's visible send button.
+     */
+    private static void dispatchViaA11ySend(final ClassLoader cl, final String pkg) {
+        Object mgr = ensureAsrManager(cl);
+        if (mgr != null) {
+            try {
+                XposedHelpers.callMethod(mgr, "p0", false, "");
+                log("p0(false,\"\") fired (a11y send path pkg=" + pkg + ")");
+            } catch (Throwable e) {
+                log("ERR p0() a11y: " + e.getClass().getSimpleName());
+            }
+        }
+        pollAsrSettleThen(cl,
+                NEWLINE_ASR_SETTLE_MS,
+                NEWLINE_ASR_MAX_WAIT_MS,
+                SystemClock.elapsedRealtime(),
+                () -> broadcastA11ySend(cl, pkg));
     }
 
     /**
@@ -742,6 +774,14 @@ public final class DoubaoLetterLongPressHook {
                                               final long settleMs,
                                               final long maxWaitMs,
                                               final long startTs) {
+        pollAsrSettleThen(cl, settleMs, maxWaitMs, startTs, () -> sendEnterKey(cl));
+    }
+
+    private static void pollAsrSettleThen(final ClassLoader cl,
+                                          final long settleMs,
+                                          final long maxWaitMs,
+                                          final long startTs,
+                                          final Runnable terminal) {
         sMainHandler.postDelayed(() -> {
             long now = SystemClock.elapsedRealtime();
             long waited = now - startTs;
@@ -750,26 +790,47 @@ public final class DoubaoLetterLongPressHook {
             if (waited >= maxWaitMs) {
                 log("asr-settle TIMEOUT waited=" + waited
                         + "ms responded=" + asrRespondedAfterDispatch
-                        + " -> ENTER anyway");
-                sendEnterKey(cl);
+                        + " -> terminal anyway");
+                terminal.run();
                 return;
             }
 
             if (!asrRespondedAfterDispatch) {
                 // Phase 1: still waiting for first post-dispatch ASR callback
-                pollAsrSettleAndEnter(cl, settleMs, maxWaitMs, startTs);
+                pollAsrSettleThen(cl, settleMs, maxWaitMs, startTs, terminal);
                 return;
             }
 
             // Phase 2: ASR has responded — measure quiet time since last callback
             long quiet = now - sLastAsrCallbackTs;
             if (quiet >= settleMs) {
-                log("asr-settle quiet=" + quiet + "ms waited=" + waited + "ms -> ENTER");
-                sendEnterKey(cl);
+                log("asr-settle quiet=" + quiet + "ms waited=" + waited + "ms -> terminal");
+                terminal.run();
             } else {
-                pollAsrSettleAndEnter(cl, settleMs, maxWaitMs, startTs);
+                pollAsrSettleThen(cl, settleMs, maxWaitMs, startTs, terminal);
             }
         }, NEWLINE_ASR_POLL_MS);
+    }
+
+    /** Broadcasts a request to our AccessibilityService to click the send button. */
+    private static void broadcastA11ySend(ClassLoader cl, String pkg) {
+        try {
+            Class<?> jniCls = XposedHelpers.findClass(KEYBOARD_JNI, cl);
+            Object ime = XposedHelpers.getStaticObjectField(jniCls, "mImeService");
+            if (!(ime instanceof android.content.Context)) {
+                log("skip broadcastA11ySend: mImeService not Context");
+                return;
+            }
+            android.content.Context ctx = (android.content.Context) ime;
+            android.content.Intent intent = new android.content.Intent(
+                    DoubaoVoiceSendA11yService.ACTION_A11Y_SEND)
+                    .setPackage("com.jin.doubaolongpressvoice")
+                    .putExtra(DoubaoVoiceSendA11yService.EXTRA_TARGET_PKG, pkg);
+            ctx.sendBroadcast(intent);
+            log("broadcast a11y send pkg=" + pkg);
+        } catch (Throwable t) {
+            log("ERR broadcastA11ySend: " + Log.getStackTraceString(t));
+        }
     }
 
     /** Sends KEYCODE_ENTER (66) via {@code InputMethodService.sendDownUpKeyEvents}. */

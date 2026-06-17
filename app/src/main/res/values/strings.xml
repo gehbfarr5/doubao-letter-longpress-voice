@@ -2,4 +2,6 @@
 <resources>
     <string name="app_name">豆包字母键长按语音</string>
     <string name="xposed_description">长按豆包输入法字母键触发语音输入：按住录音、原地松手上屏、上滑取消</string>
+    <string name="a11y_service_label">豆包语音发送助手</string>
+    <string name="a11y_service_description">在 Claude / ChatGPT 等应用中，长按字母键语音输入上滑后，自动点击发送按钮。</string>
 </resources>
