@@ -49,3 +49,20 @@ DoubaoVoiceSendA11yService.java:79-83: API >= 33 -> `registerReceiver(mReceiver,
 
 ## Notes (non-blocking)
 - System `java` not on PATH on this machine; build required brew openjdk@21. Not a defect in the change.
+
+---
+
+## Real-device test (2026-06-17, post-static-verify) — PASS
+
+Static verify above was the gate for the first commit (7293b9e). On-device run then surfaced two functional issues, both fixed in 722daa7:
+
+| Item | First run | After fix (722daa7) |
+|---|---|---|
+| Claude send (WebView) | ✅ `ACTION_CLICK ok=true` | ✅ still sends |
+| ChatGPT send (Compose) | ❌ "no send node", dump empty | ✅ sends |
+| Toolbar label in Claude/ChatGPT | ❌ shows 换行 | ✅ shows 发送 |
+| Newline path (other apps) | ✅ | ✅ no regression |
+
+Root cause of ChatGPT miss: Jetpack Compose send button reports `isClickable()==false` but exposes `ACTION_CLICK` as a semantic action; old matcher + dump only considered `isClickable()`. Fix: match/click via `getActionList()` ACTION_CLICK, broaden keywords (zh 发送/提交), dump any actionable-or-labeled node. Label fix: a11y packages now use the SEND-label override.
+
+**Verdict: v1.4.0 PASS on real device (Claude + ChatGPT).**

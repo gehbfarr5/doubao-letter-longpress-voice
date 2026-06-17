@@ -11,16 +11,21 @@
 
 ---
 
-### #0 — v1.4.1 真机收尾（最高优先，阻塞 v1.4.0 真正可用）
+### #0 — v1.4.0 真机收尾 ✅ 已完成 (2026-06-17, 722daa7)
 
-1. 装 v1.4.0 APK → 设置→无障碍 启用「豆包语音发送助手」。
-2. 在 Claude / ChatGPT 里长按字母键语音输入 → 上滑到发送区松手。
-3. `adb logcat | grep DoubaoVoiceSend`：
-   - 命中 → 成功，记录实际节点。
-   - 未命中 → 读 dump 出的 clickable 节点（id/text/desc/class/bounds），把真值写进 `DoubaoVoiceSendA11yService` 的 SELECTORS。
-4. 顺手把 Claude/ChatGPT 发送按钮节点结构记到 `DOUBAO-INTERNALS.md`（呼应 #3 勘探精神）。
+真机实测结论：
+- **Claude**（WebView）：一开始就命中（按钮真 `isClickable`），发送 OK。
+- **ChatGPT**（Jetpack Compose）：首测 miss 且 dump 空 → 根因 = Compose 发送按钮 `isClickable()==false`、只在 action list 暴露语义 `ACTION_CLICK`；旧 dump 只打印 `isClickable()` 节点所以一行没有。
+- 修复：匹配/点击改看 `getActionList()` 含 `ACTION_CLICK`，关键词加中文「发送/提交」，dump 改打印"可操作或带文本/desc"的节点。
+- 标签修复：a11y 包走 `resolveEffectiveEnterOrdinal` 的 SEND 覆盖 → 工具栏显示「发送」而非「换行」。
+- 复测：Claude + ChatGPT 均正常发送，标签均为「发送」，换行路径无回归。
 
-后续可加：引导 Activity（一键跳无障碍设置 + 状态提示），目前需用户手动进设置。
+### 后续可做（post-v1.4.0 backlog）
+
+1. **引导 Activity**：一键跳「设置→无障碍」+ 服务启用状态提示（当前需用户手动进设置；reinstall 后无障碍可能被系统解绑需重开）。
+2. **扩展更多应用**：Gemini / Grok / 其它聊天类 App，复用同一 a11y 服务 + 补选择器。靠 logcat dump 勘探节点。
+3. **选择器健壮化**：当前是启发式（含 send/发送 + 可点击）。可加 per-package resource-id 精确匹配作为首选、启发式兜底。
+4. **`DOUBAO-INTERNALS.md`**：沉淀 Claude/ChatGPT（及豆包自身）节点结构与 hook 点，作为后续 feature reference（呼应 #3 勘探精神）。
 
 ---
 

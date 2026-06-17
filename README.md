@@ -26,6 +26,7 @@
   - `GO / SEARCH / SEND / SEND_EXPRESSION` 走 `AsrManager.t(ordinal, now)`（等 ASR 整理结果后再触发，跟豆包空格长按发送同路径）
   - `NEXT / DONE / PREVIOUS / NONE` 走快路径（`p0(false,"") + KEYCODE_ENTER`），换行响应在 200ms 内
 - **滑出键盘 → 撤回输入**：清掉 preedit + 抑制所有 ASR commit 1.2s
+- **跨应用发送（Claude / ChatGPT）**：这类应用的"发送"挂在前端按钮 `onClick` 上、对 IME 动作无回调，IME 层发不出去。模块自带一个 **AccessibilityService**：滑到工具栏松手时先上屏文字，再让无障碍服务找到当前应用的发送按钮并模拟点击（兼容 WebView 与 Jetpack Compose 的语义点击）。需单独授权无障碍（见安装步骤）
 - **图标徽章 UI**：横向 LinearLayout，复用豆包自家 `oic_send` / `oic_search` / `oic_enter` 图标 + `ic_delete_white`（豆包退格上滑清空那个垃圾桶），间距从豆包候选框 padding 资源动态读取，跟豆包视觉风格一致
 - **跟随豆包"按键震动"设置**，复用 `UserInteractiveManagerNext.g(.., SPEECH_START, ..)` 调用链
 - **修复了按键残留高亮**，触发时补发 `nativeTouch(ACTION_CANCEL)` 让 native 立刻清掉 pressed 状态
@@ -46,6 +47,7 @@
 | 屏幕分辨率 / 尺寸 | 任意（手机、平板） | 所有几何判定基于 ratio (`y/h`, `x/w`)，与分辨率无关 |
 | 横屏 / 平板 | 🚧 不主动适配 | 豆包横屏默认走浮动键盘，浮动模式本来就被排除；如果你的设备/版本是横屏全键盘，几何判定理论上还有效 |
 | 浮动键盘 / 单手模式 | 🚫 **不支持**（自动跳过） | 几何比例不固定，强行触发会误判 |
+| 跨应用发送（a11y） | **Claude** (`com.anthropic.claude`) + **ChatGPT** (`com.openai.chatgpt`) 实测可发送 | 发送按钮选择器按"内容描述/文本含 send/发送 + 可点击/语义 ACTION_CLICK"匹配；其它应用版本可能需补选择器（服务在找不到时会把候选节点 dump 到 logcat 便于扩展） |
 
 **适配范围说明**：这个模块只针对**普通竖屏全宽键盘**做适配，是绝大多数使用场景。横屏 / 浮动 / 单手等小众场景目前不支持，未来视需求扩展。
 
@@ -56,6 +58,7 @@
 3. 在 LSPosed 管理器里**启用本模块**并**勾选作用域** `豆包输入法 (com.bytedance.android.doubaoime)`
 4. 强制停止豆包输入法（设置 → 应用 → 豆包输入法 → 强制停止）或重启设备
 5. 切到豆包 26 键 / 9 宫格，**长按任意字母键 / 拼音键** —— 应该感受到震动并出现语音面板
+6. **（可选，仅 Claude / ChatGPT 跨应用发送需要）** 到 **设置 → 无障碍 → 已下载的服务**，启用 **「豆包语音发送助手」**。授权后在 Claude / ChatGPT 里语音输入上滑到工具栏即可自动点击发送；不授权也不影响其它应用的上屏/换行功能
 
 ## 🎯 使用
 
@@ -127,6 +130,7 @@ Hook `ImeService.onFinishInput()` 和 `onFinishInputView(boolean)` 清掉所有 
 - 仅对豆包 **v1.3.11** 实测过。其它版本可能因混淆字段重命名失效（不会崩，只会该功能不工作）。
 - 横向滑出 cancel 失效：豆包 KeyboardView 在常规设备上横向铺满全屏，系统会把 x 钳到边界。**仅支持向上 / 向下滑出 cancel**。
 - "整理"效果依赖豆包 ASR 引擎自身能力（标点、同音字纠正等），不是 LLM 级别的语义改写。LLM 候选窗 (`LLMCandidate.updateCandidateList`) 不在本模块范围内。
+- 跨应用发送（a11y）目前实测 **Claude / ChatGPT**；发送按钮选择器是基于"含 send/发送 + 可点击"的启发式匹配，应用大改版或新增应用可能需要补选择器（服务找不到时会把当前界面的候选节点 dump 到 logcat：`adb logcat -s DoubaoVoiceSend`）。需手动授权无障碍服务。
 
 ## 🤝 贡献
 
