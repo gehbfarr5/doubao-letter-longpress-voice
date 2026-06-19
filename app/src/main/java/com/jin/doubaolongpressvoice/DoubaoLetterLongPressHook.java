@@ -1047,10 +1047,23 @@ public final class DoubaoLetterLongPressHook {
                 if (!sSuppressNextUp) {
                     return;
                 }
-                if (sAsrStartConfirmed) {
-                    return;
+                // sAsrStartConfirmed (text output) lags 500-1000ms behind ASR start.
+                // Use E() (process alive flag) as the authoritative rollback signal instead.
+                Object mgr = ensureAsrManager(cl);
+                if (mgr != null) {
+                    try {
+                        Object running = XposedHelpers.callMethod(mgr, "E");
+                        if (!Boolean.FALSE.equals(running)) {
+                            return; // ASR is running — no rollback
+                        }
+                    } catch (Throwable t) {
+                        log("ERR ASR verify E(): " + t.getClass().getSimpleName());
+                        return; // unknown state — don't rollback
+                    }
+                } else {
+                    return; // manager not ready — don't rollback
                 }
-                log("ASR did NOT start (no preedit in 300ms) -> rollback suppress");
+                log("ASR did NOT start (E()=false at 300ms) -> rollback suppress");
                 sSuppressNextUp = false;
                 sMaxDisplacementSq = 0f;
             }
