@@ -125,7 +125,6 @@ public final class DoubaoLetterLongPressHook {
     private static final int ACTION_CANCEL = MotionEvent.ACTION_CANCEL;
     private static final String ASR_CANCEL_REASON = "cancel";
     private static final long CANCEL_WINDOW_MS = 1200L;
-    private static final long COMMIT_TAIL_DELAY_MS = 600L;     // fallback path only
     private static final long ASR_START_VERIFY_DELAY_MS = 80L;
     /**
      * Newline-path ASR-settle parameters. Instead of a fixed delay before
@@ -288,6 +287,8 @@ public final class DoubaoLetterLongPressHook {
     private static volatile TextView sOverlayLabel;
     private static volatile int sCurrentOverlayColor = COLOR_TRANSPARENT;
     private static volatile ValueAnimator sColorAnimator;
+    private static volatile ViewGroup sOverlayParent;
+    private static volatile int sCachedToolbarHeight = -1;
 
     // --- lazy-resolved Doubao internals ---
     private static volatile Object sUserInteractiveMgr;
@@ -350,7 +351,8 @@ public final class DoubaoLetterLongPressHook {
                                 int h = kvView.getHeight();
                                 int kbdType = readKbdType(cl);
                                 int inputClass = readInputClass(cl);
-                                int toolbarHeight = readToolbarHeight(cl);
+                                int toolbarHeight = (sCachedToolbarHeight > 0)
+                                        ? sCachedToolbarHeight : readToolbarHeight(cl);
 
                                 if (isNonTextInputClass(inputClass)) {
                                     log("gate=non_text_input inputClass=0x"
@@ -469,7 +471,8 @@ public final class DoubaoLetterLongPressHook {
                                     uy = ev.getY();
                                     vw = vv.getWidth();
                                     vh = vv.getHeight();
-                                    int tbH = readToolbarHeight(cl);
+                                    int tbH = (sCachedToolbarHeight > 0)
+                                            ? sCachedToolbarHeight : readToolbarHeight(cl);
                                     releaseZone = computeZone(ux, uy, vw, vh, tbH);
                                 } else {
                                     releaseZone = sCurrentZone;
@@ -549,7 +552,10 @@ public final class DoubaoLetterLongPressHook {
                                 param.setResult(Boolean.TRUE);
                                 return;
                             }
-                            sLastAsrCallbackTs = SystemClock.elapsedRealtime();
+                            // Update poll-fallback timestamp only when listener path unavailable.
+                            if (sAsrProcess == null) {
+                                sLastAsrCallbackTs = SystemClock.elapsedRealtime();
+                            }
                         }
                     });
             log("hooked " + KEYBOARD_JNI + "#onAsrCommitPreeditText");
@@ -568,7 +574,10 @@ public final class DoubaoLetterLongPressHook {
                                 param.setResult(Boolean.TRUE);
                                 return;
                             }
-                            sLastAsrCallbackTs = SystemClock.elapsedRealtime();
+                            // Update poll-fallback timestamp only when listener path unavailable.
+                            if (sAsrProcess == null) {
+                                sLastAsrCallbackTs = SystemClock.elapsedRealtime();
+                            }
                         }
                     });
             log("hooked " + KEYBOARD_JNI + "#onAsrSetPreedit");
@@ -598,6 +607,22 @@ public final class DoubaoLetterLongPressHook {
         } catch (Throwable t) {
             log("ERR hook onFinishInputView: " + t.getClass().getSimpleName());
         }
+        try {
+            XposedHelpers.findAndHookMethod(IME_SERVICE, cl, "onStartInputView",
+                    EditorInfo.class, boolean.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            int h = readToolbarHeight(sClassLoader);
+                            if (h > 0) {
+                                sCachedToolbarHeight = h;
+                            }
+                        }
+                    });
+            log("hooked " + IME_SERVICE + "#onStartInputView");
+        } catch (Throwable t) {
+            log("ERR hook onStartInputView: " + t.getClass().getSimpleName());
+        }
     }
 
     private static void resetVolatileState(String reason) {
@@ -609,20 +634,15 @@ public final class DoubaoLetterLongPressHook {
         sCancelUntilElapsed = 0L;
         sMaxDisplacementSq = 0f;
         sCurrentZone = Zone.LETTER;
+        sCachedToolbarHeight = -1;
         cancelPendingCommit();
-        // Detach overlay; reattach lazily next time.
         LinearLayout ov = sOverlay;
         if (ov != null) {
             try {
-                ViewParent p = ov.getParent();
-                if (p instanceof ViewGroup) {
-                    ((ViewGroup) p).removeView(ov);
-                }
+                ov.setVisibility(View.GONE);
             } catch (Throwable ignore) {
             }
-            sOverlay = null;
-            sOverlayIcon = null;
-            sOverlayLabel = null;
+            // Keep sOverlay, sOverlayIcon, sOverlayLabel references for reuse.
         }
     }
 
@@ -1419,7 +1439,7 @@ public final class DoubaoLetterLongPressHook {
      */
     private static void maybeUpdateZone(ClassLoader cl, View kvView, float x, float y,
                                         int w, int h) {
-        int tbH = readToolbarHeight(cl);
+        int tbH = (sCachedToolbarHeight > 0) ? sCachedToolbarHeight : readToolbarHeight(cl);
         Zone next = computeZone(x, y, w, h, tbH);
         if (next == sCurrentZone) {
             return;
@@ -1438,15 +1458,9 @@ public final class DoubaoLetterLongPressHook {
         if (next == Zone.TOOLBAR || next == Zone.OUTSIDE) {
             performZoneSelectionFeedback();
         }
-        // Detailed diagnostic — three sources side by side so we can spot drift.
-        int srcA = readEnterTypeFromEditorViewInfo(cl);
-        int srcB = readEnterTypeOrdinal(cl);
-        int rawAct = readCurrentEditboxAction(cl);
-        log("zone " + prev + " -> " + next + " coord=(" + x + "," + y
-                + ") tbH=" + tbH
-                + " EditorViewInfo.d=" + srcA
-                + " mCurrentEnterType.ord=" + srcB
-                + " mCurrentEditboxAction=0x" + Integer.toHexString(rawAct)
+        log("zone " + prev + " -> " + next
+                + " coord=(" + x + "," + y + ")"
+                + " tbH=" + tbH
                 + " resolved=" + enterOrdinal);
     }
 
@@ -1477,41 +1491,22 @@ public final class DoubaoLetterLongPressHook {
 
     /**
      * Resolves the canonical {@code EnterActionType} ordinal Doubao would use.
-     * Cross-checks three sources and picks the most specific (highest ordinal
-     * known to be a real IME action), because in some apps (notably WeChat
-     * chat) {@code KeyboardJni.mCurrentEnterType} ends up stale at
-     * {@code kUnknow}/{@code kIME_ACTION_NONE} when {@code IME_FLAG_NO_ENTER_ACTION}
-     * is set on imeOptions.
-     *
-     * <p>Sources tried, in priority order:
-     * <ol>
-     *   <li>{@code EditorViewInfo.e().d()} — the cached value AsrLongPressView
-     *       reads from when picking its right-button text;</li>
-     *   <li>{@code KeyboardJni.mCurrentEnterType.ordinal()};</li>
-     *   <li>{@code KeyboardJni.mCurrentEditboxAction & 0xFF} — raw imeOptions
-     *       action bits (catches cases where flags polluted the others).</li>
-     * </ol>
+     * Uses {@code EditorViewInfo.e().d()} as the authoritative source, matching
+     * what AsrLongPressView reads when picking its right-button text.
      */
     private static int resolveEnterOrdinal(ClassLoader cl) {
+        // EditorViewInfo.e().d() is the authoritative source (used by AsrLongPressView).
         int fromEditorViewInfo = readEnterTypeFromEditorViewInfo(cl);
+        if (fromEditorViewInfo >= 2 && fromEditorViewInfo <= 8) {
+            return fromEditorViewInfo;
+        }
+        // Fallback: mCurrentEnterType (may be stale in some editors).
         int fromEnterType = readEnterTypeOrdinal(cl);
-        int rawAction = readCurrentEditboxAction(cl);
-        int fromRawLow = rawAction & 0xFF;
-        // Pick the highest "specific" value (in {2..8}). If none is specific,
-        // fall back to the highest non-negative value.
-        int best = -1;
-        for (int candidate : new int[]{fromEditorViewInfo, fromEnterType, fromRawLow}) {
-            if (candidate >= 2 && candidate <= 8) {
-                if (candidate > best) {
-                    best = candidate;
-                }
-            }
+        if (fromEnterType >= 2 && fromEnterType <= 8) {
+            return fromEnterType;
         }
-        if (best >= 0) {
-            return best;
-        }
-        // None specific — pick the highest non-negative for diagnostic clarity.
-        return Math.max(0, Math.max(fromEditorViewInfo, Math.max(fromEnterType, fromRawLow)));
+        // Return best non-negative value for diagnostic clarity.
+        return Math.max(0, Math.max(fromEditorViewInfo, fromEnterType));
     }
 
     /**
@@ -1711,23 +1706,35 @@ public final class DoubaoLetterLongPressHook {
         if (toolbarHeight <= 0) {
             return null;
         }
+        // Reuse existing overlay if already attached to the correct parent.
+        LinearLayout existing = sOverlay;
+        if (existing != null) {
+            ViewParent existingParent = existing.getParent();
+            Object inputView = getInputView(cl);
+            if (existingParent instanceof FrameLayout && existingParent == inputView) {
+                if (existing.getVisibility() != View.VISIBLE) {
+                    existing.setVisibility(View.VISIBLE);
+                }
+                updateOverlayLayout(existing, toolbarHeight);
+                return existing;
+            }
+            // Parent changed (rare) — detach old and recreate below.
+            try {
+                if (existingParent instanceof ViewGroup) {
+                    ((ViewGroup) existingParent).removeView(existing);
+                }
+            } catch (Throwable ignore) {}
+            sOverlay = null;
+            sOverlayIcon = null;
+            sOverlayLabel = null;
+            sOverlayParent = null;
+        }
         Object inputView = getInputView(cl);
         ViewGroup parent = (inputView instanceof FrameLayout)
                 ? (FrameLayout) inputView : null;
         if (parent == null) {
             log("ensureOverlay: InputView not a FrameLayout, overlay skipped");
             return null;
-        }
-        LinearLayout existing = sOverlay;
-        if (existing != null && existing.getParent() == parent) {
-            updateOverlayLayout(existing, toolbarHeight);
-            return existing;
-        }
-        if (existing != null) {
-            try {
-                ViewParent p = existing.getParent();
-                if (p instanceof ViewGroup) ((ViewGroup) p).removeView(existing);
-            } catch (Throwable ignore) {}
         }
         try {
             float density = parent.getResources().getDisplayMetrics().density;
@@ -1806,6 +1813,7 @@ public final class DoubaoLetterLongPressHook {
             sOverlay = root;
             sOverlayIcon = icon;
             sOverlayLabel = label;
+            sOverlayParent = parent;
             log("overlay attached toolbarH=" + toolbarHeight
                     + " stripH=" + stripHeight + "px"
                     + " margin=" + margin + "px (density=" + density + ")");
