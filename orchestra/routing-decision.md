@@ -1,31 +1,26 @@
-# Routing Decision — v1.4.0 Claude/ChatGPT a11y send
+# Routing Decision — v1.5.x 无障碍保活 + 豆包逆向勘探
 
-| 项 | 值 |
-|---|---|
-| 日期 | 2026-06-17 |
-| 需求 | 推进 v1.4.0 = Claude + ChatGPT 发送适配（Accessibility Service） |
-| 类型 | 代码改动 → 完整 plan→执行→验收→commit |
-| 档位 | 质量优先 |
-| 选档理由 | 新增跨进程 a11y 组件 + 改 manifest + 在核心 dispatch 入口 (`commitAndDispatchToolbarAction`) 插新路径并重构 settle-poll。错改会回归已稳定的 Nekogram/换行路径。 |
-| Executor model | `codex -m gpt-5.5`（传 `gpt-5.5` 给 wrapper，不 hardcode id） |
-| Verifier | 独立子 Agent，Opus，fresh context，机器证据（build + grep）判成败 |
-| Task file | `orchestra/task-current.md`（设计在 `orchestra/PLAN-v1.4.0.md`） |
-| 项目目录 | `/Users/jin/Documents/oss/doubao-letter-longpress-voice` |
-| 分支 | `feat/claude-chatgpt-a11y-send` |
-| 撞车检测 | codex(gpt-5.x) 与 reasonix(deepseek-v4-pro) 不撞；本会话独占 orchestra/.lock |
-| 用量预算 | 单 round Codex；研究已由 Planner 完成（源码挖掘 + 用户决策） |
-| Repair 预算 | 最多 2 轮 |
-| Sandbox | `-s workspace-write -C <项目>`（强制） |
-| 用户决策(2026-06-17) | 范围 = Claude+ChatGPT 都做；选择器 = best-guess + 自探针 dump |
+| 项 | Task B（代码）| Task A（分析）|
+|---|---|---|
+| 日期 | 2026-06-20 | 2026-06-20 |
+| 需求 | 无障碍保活 Layer 1（BOOT_COMPLETED 自恢复）| 逆向豆包空格长按 ASR 完成机制 |
+| 类型 | 代码改动 → 完整流程 | 运行/分析迭代 → 轻流程 |
+| 档位 | 默认（`gpt-5.4`）| 质量优先（`gpt-5.5`）|
+| 选档理由 | 简单新增：一个 Receiver 类 + manifest 两行 | 需要深度推理混淆代码，找权威 hook 点 |
+| Executor model | `codex -m gpt-5.4` | `codex -m gpt-5.5` |
+| Verifier | 独立子 Agent，Sonnet，build + grep 取证 | 不走 Verifier（分析任务）|
+| Task file | `orchestra/HANDOFF-a11y-keepalive-layer1.md` | `orchestra/HANDOFF-doubao-internals.md` |
+| 项目目录 | `/Users/jin/Documents/oss/doubao-letter-longpress-voice` | 同左 |
+| 执行顺序 | 先（串行锁限制）| B 完成后 |
+| Sandbox | `-s workspace-write -C <项目>`（强制）| 同左（只写 orchestra/DOUBAO-INTERNALS.md）|
+| 撞车检测 | 串行，无撞车风险 | 同左 |
+| Repair 预算 | 最多 2 轮 | N/A |
 
-## 已知风险与 Repair 触发条件
+## 已知风险
 
 | 情况 | 路由动作 |
 |---|---|
-| `EXEC_QUOTA` | 兜底 Reasonix (`orch-reasonix.sh`)，patch 法 |
+| `EXEC_QUOTA` | 兜底 Reasonix |
 | `EXEC_AUTH` | 停，提示用户重登 Codex |
-| `EXEC_ERR` | 同档收窄重试 1 次 |
-| Verifier FAIL：编译失败 | 回 Executor + repair-task.md（指出编译报错末 30 行 / grep 缺项） |
-| Verifier FAIL：grep 断言缺项 | 同上 |
-| 2 轮 repair 仍败 | 回 Planner，人工评估 |
-| 选择器真机不命中 | 预期内 → 走自探针 dump，按 log 回填真值 v1.4.1（非 repair） |
+| Task A jadx 超时 | 记录已找到内容，不空手而归 |
+| Task A 类名全混淆找不到 | 记录"未找到"，给出搜索路径，回 Planner 评估是否换工具 |
