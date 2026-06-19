@@ -124,7 +124,7 @@ public final class DoubaoLetterLongPressHook {
     private static final int DO_FUNCTION_KEY_SEND_ACTION = 2;   // doSendAction()
     private static final int ACTION_CANCEL = MotionEvent.ACTION_CANCEL;
     private static final String ASR_CANCEL_REASON = "cancel";
-    private static final long CANCEL_WINDOW_MS = 1200L;
+    private static final long CANCEL_WINDOW_MS = 500L;
     /**
      * Newline-path ASR-settle parameters. Instead of a fixed delay before
      * dispatching KEYCODE_ENTER (which races with Doubao's async ASR polish
@@ -841,7 +841,9 @@ public final class DoubaoLetterLongPressHook {
                 log("asr-settle TIMEOUT waited=" + waited
                         + "ms responded=" + asrRespondedAfterDispatch
                         + " -> terminal anyway");
-                terminal.run();
+                if (terminal != null) {
+                    terminal.run();
+                }
                 return;
             }
 
@@ -855,7 +857,9 @@ public final class DoubaoLetterLongPressHook {
             long quiet = now - sLastAsrCallbackTs;
             if (quiet >= settleMs) {
                 log("asr-settle quiet=" + quiet + "ms waited=" + waited + "ms -> terminal");
-                terminal.run();
+                if (terminal != null) {
+                    terminal.run();
+                }
             } else {
                 pollAsrSettleThen(cl, settleMs, maxWaitMs, startTs, terminal);
             }
@@ -953,6 +957,8 @@ public final class DoubaoLetterLongPressHook {
                 log("ERR AsrManager.p0: " + t.getClass().getSimpleName());
             }
         }
+        // Diagnostic probe: log whether L.a all-back fires on cancel (does NOT change behavior).
+        subscribeAsrAllBackThen(cl, 2000L, null);
     }
 
     private static void forceVad(ClassLoader cl) {
@@ -1216,7 +1222,9 @@ public final class DoubaoLetterLongPressHook {
                                 sMainHandler.removeCallbacks(timeoutRef[0]);
                             }
                             safeW(proc, lcls, null);
-                            sMainHandler.post(terminal);
+                            if (terminal != null) {
+                                sMainHandler.post(terminal);
+                            }
                             log("asr-allback: s.g()=true -> terminal");
                         } catch (Throwable t) {
                             log("ERR allBack listener: " + t.getClass().getSimpleName());
@@ -1237,7 +1245,9 @@ public final class DoubaoLetterLongPressHook {
             done[0] = true;
             safeW(proc, lcls, null);
             log("asr-allback: TIMEOUT " + maxWaitMs + "ms -> terminal");
-            terminal.run();
+            if (terminal != null) {
+                terminal.run();
+            }
         };
         timeoutRef[0] = timeout;
         try {
