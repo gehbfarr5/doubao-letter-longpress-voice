@@ -21,7 +21,18 @@
 
 ---
 
-## Task A — 逆向豆包 ASR 完成机制（B 完成后执行）
+## Task C — pollAsrSettleThen → L.a listener 替换（A 完成后执行）✅ 待执行
+
+**档位**：质量优先（`gpt-5.5`）
+**类型**：代码改动，走完整流程
+**HANDOFF**：`orchestra/HANDOFF-poll-to-listener.md`
+
+### 涉及文件
+- `app/src/main/java/com/jin/doubaolongpressvoice/DoubaoLetterLongPressHook.java`（只改这一个）
+
+---
+
+## Task A — 逆向豆包 ASR 完成机制（B 完成后执行）✅ 已完成
 
 **档位**：质量优先（`gpt-5.5`）
 **类型**：运行/分析迭代，不走完整验收/commit
