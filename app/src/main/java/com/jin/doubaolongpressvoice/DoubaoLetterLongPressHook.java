@@ -125,7 +125,6 @@ public final class DoubaoLetterLongPressHook {
     private static final int ACTION_CANCEL = MotionEvent.ACTION_CANCEL;
     private static final String ASR_CANCEL_REASON = "cancel";
     private static final long CANCEL_WINDOW_MS = 1200L;
-    private static final long ASR_START_VERIFY_DELAY_MS = 80L;
     /**
      * Newline-path ASR-settle parameters. Instead of a fixed delay before
      * dispatching KEYCODE_ENTER (which races with Doubao's async ASR polish
@@ -275,6 +274,7 @@ public final class DoubaoLetterLongPressHook {
     /** Last time onAsrSetPreedit / onAsrCommitPreeditText fired — used by mode-8 ASR-settle poll. */
     private static volatile long sLastAsrCallbackTs = 0L;
     private static volatile boolean sSuppressNextUp = false;
+    private static volatile boolean sAsrStartConfirmed = false;
     private static volatile float sDownX;
     private static volatile float sDownY;
     private static volatile float sMaxDisplacementSq;
@@ -390,6 +390,7 @@ public final class DoubaoLetterLongPressHook {
                                 sCancelUntilElapsed = 0L;
                                 cancelPendingCommit();
                                 sSuppressNextUp = true;
+                                sAsrStartConfirmed = false;
                                 sCurrentZone = Zone.LETTER;
                                 sLastZoneChangeTs = SystemClock.elapsedRealtime();
                                 param.setResult(null);
@@ -578,11 +579,36 @@ public final class DoubaoLetterLongPressHook {
                             if (sAsrProcess == null) {
                                 sLastAsrCallbackTs = SystemClock.elapsedRealtime();
                             }
+                            // Confirm ASR actually started on first preedit output.
+                            if (sSuppressNextUp && !sAsrStartConfirmed) {
+                                sAsrStartConfirmed = true;
+                                log("AsrStartConfirmed via onAsrSetPreedit");
+                            }
                         }
                     });
             log("hooked " + KEYBOARD_JNI + "#onAsrSetPreedit");
         } catch (Throwable t) {
             log("ERR hook onAsrSetPreedit: " + Log.getStackTraceString(t));
+        }
+        try {
+            XposedHelpers.findAndHookMethod(
+                    "com.bytedance.android.input.speech.AsrContext", cl,
+                    "T", int.class, boolean.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            boolean isDone = Boolean.TRUE.equals(param.args[1]);
+                            if (isDone) {
+                                if (sAsrProcess == null) {
+                                    sLastAsrCallbackTs = SystemClock.elapsedRealtime();
+                                }
+                                log("AsrContext.T phase=" + param.args[0] + " done=true");
+                            }
+                        }
+                    });
+            log("hooked AsrContext#T");
+        } catch (Throwable t) {
+            log("ERR hook AsrContext#T: " + t.getClass().getSimpleName());
         }
     }
 
@@ -631,6 +657,7 @@ public final class DoubaoLetterLongPressHook {
             log("resetVolatileState reason=" + reason);
         }
         sSuppressNextUp = false;
+        sAsrStartConfirmed = false;
         sCancelUntilElapsed = 0L;
         sMaxDisplacementSq = 0f;
         sCurrentZone = Zone.LETTER;
@@ -998,9 +1025,8 @@ public final class DoubaoLetterLongPressHook {
 
     /**
      * Defense against silent-fail ASR start (mic permission denied, model not
-     * loaded, etc.): re-check after {@value #ASR_START_VERIFY_DELAY_MS} ms,
-     * and if the engine isn't running, drop the UP-suppression so the next
-     * keypress is not eaten.
+     * loaded, etc.): if no preedit arrives within 300 ms, drop the
+     * UP-suppression so the next keypress is not eaten.
      */
     private static void scheduleAsrStartVerification(final ClassLoader cl) {
         sMainHandler.postDelayed(new Runnable() {
@@ -1009,22 +1035,14 @@ public final class DoubaoLetterLongPressHook {
                 if (!sSuppressNextUp) {
                     return;
                 }
-                Object mgr = ensureAsrManager(cl);
-                if (mgr == null) {
+                if (sAsrStartConfirmed) {
                     return;
                 }
-                try {
-                    Object running = XposedHelpers.callMethod(mgr, "E");
-                    if (Boolean.FALSE.equals(running)) {
-                        log("ASR did NOT start (E()=false) -> rollback suppress");
-                        sSuppressNextUp = false;
-                        sMaxDisplacementSq = 0f;
-                    }
-                } catch (Throwable t) {
-                    log("ERR ASR start verify: " + t.getClass().getSimpleName());
-                }
+                log("ASR did NOT start (no preedit in 300ms) -> rollback suppress");
+                sSuppressNextUp = false;
+                sMaxDisplacementSq = 0f;
             }
-        }, ASR_START_VERIFY_DELAY_MS);
+        }, 300L);
     }
 
     // ===== Lazy resolution =====
