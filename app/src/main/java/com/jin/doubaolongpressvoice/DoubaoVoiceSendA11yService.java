@@ -34,6 +34,21 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
     private static final String[] SEND_KEYWORDS = {
             "send", "发送", "提交", "发送消息", "send message", "send prompt"
     };
+    /** Keywords that disqualify a node from being the send button. */
+    private static final String[] EXCLUDE_KEYWORDS = {
+            "图片", "文件", "image", "file", "attachment", "photo", "album", "表情", "emoji"
+    };
+    /**
+     * Known stable resource-id for the send button, keyed by package name.
+     * null = no stable id available for this package (fall back to heuristic).
+     * Populated from real-device logcat dumps; update when apps change.
+     */
+    private static final java.util.Map<String, String> PACKAGE_SEND_VIEW_ID;
+    static {
+        PACKAGE_SEND_VIEW_ID = new java.util.HashMap<>();
+        PACKAGE_SEND_VIEW_ID.put("com.anthropic.claude", null);
+        PACKAGE_SEND_VIEW_ID.put("com.openai.chatgpt", null);
+    }
 
     private BroadcastReceiver mReceiver;
     private boolean mReceiverRegistered;
@@ -129,6 +144,26 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
                 Log.w(TAG, "ERR read root package: " + t.getClass().getSimpleName());
             }
 
+            // Fast path: per-package stable viewId (if known).
+            if (targetPkg != null && PACKAGE_SEND_VIEW_ID.containsKey(targetPkg)) {
+                String viewId = PACKAGE_SEND_VIEW_ID.get(targetPkg);
+                if (viewId != null) {
+                    java.util.List<AccessibilityNodeInfo> byId =
+                            root.findAccessibilityNodeInfosByViewId(viewId);
+                    if (byId != null && !byId.isEmpty()) {
+                        AccessibilityNodeInfo n = byId.get(0);
+                        AccessibilityNodeInfo clickable = nearestClickable(n);
+                        if (clickable == null) {
+                            clickable = n;
+                        }
+                        boolean ok = clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                        Log.i(TAG, "performSend(viewId): ACTION_CLICK ok=" + ok
+                                + " viewId=" + viewId);
+                        return;
+                    }
+                }
+            }
+
             AccessibilityNodeInfo node = findSendNode(root, targetPkg);
             if (node != null) {
                 AccessibilityNodeInfo clickable = nearestClickable(node);
@@ -150,47 +185,93 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
         }
     }
 
-    private AccessibilityNodeInfo findSendNode(AccessibilityNodeInfo node, String targetPkg) {
+    private AccessibilityNodeInfo findSendNode(AccessibilityNodeInfo root, String targetPkg) {
         try {
-            if (node == null) {
+            if (root == null) {
                 return null;
             }
-            if (matchesSend(node)) {
+            java.util.List<AccessibilityNodeInfo> candidates = new java.util.ArrayList<>();
+            collectSendCandidates(root, candidates);
+            if (candidates.isEmpty()) {
+                return null;
+            }
+            final int screenWidth = getResources().getDisplayMetrics().widthPixels;
+            java.util.Collections.sort(candidates, new java.util.Comparator<AccessibilityNodeInfo>() {
+                @Override
+                public int compare(AccessibilityNodeInfo a, AccessibilityNodeInfo b) {
+                    int scoreA = candidateScore(a, screenWidth);
+                    int scoreB = candidateScore(b, screenWidth);
+                    return Integer.compare(scoreB, scoreA);
+                }
+            });
+            return candidates.get(0);
+        } catch (Throwable t) {
+            Log.w(TAG, "ERR findSendNode: " + t.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /** DFS: collect ALL nodes that match send keywords, are not excluded, and are actionable. */
+    private void collectSendCandidates(AccessibilityNodeInfo node,
+            java.util.List<AccessibilityNodeInfo> out) {
+        try {
+            if (node == null) {
+                return;
+            }
+            if (matchesSendCandidate(node)) {
                 AccessibilityNodeInfo clickable = nearestClickable(node);
-                return clickable != null ? clickable : node;
+                out.add(clickable != null ? clickable : node);
             }
             int count = node.getChildCount();
             for (int i = 0; i < count; i++) {
-                AccessibilityNodeInfo child = null;
                 try {
-                    child = node.getChild(i);
-                    AccessibilityNodeInfo found = findSendNode(child, targetPkg);
-                    if (found != null) {
-                        return found;
-                    }
+                    AccessibilityNodeInfo child = node.getChild(i);
+                    collectSendCandidates(child, out);
                 } catch (Throwable t) {
-                    Log.w(TAG, "ERR find child: " + t.getClass().getSimpleName());
+                    // skip
                 }
             }
         } catch (Throwable t) {
-            Log.w(TAG, "ERR findSendNode: " + t.getClass().getSimpleName());
+            Log.w(TAG, "ERR collectSendCandidates: " + t.getClass().getSimpleName());
         }
-        return null;
     }
 
-    private boolean matchesSend(AccessibilityNodeInfo node) {
+    /**
+     * A node is a send candidate if:
+     * 1. Its text or description contains a send keyword
+     * 2. It does NOT contain an exclude keyword
+     * 3. It is actionable (or has an actionable ancestor)
+     */
+    private boolean matchesSendCandidate(AccessibilityNodeInfo node) {
         try {
             if (!containsSend(node.getContentDescription()) && !containsSend(node.getText())) {
                 return false;
             }
-            // Compose/WebView send buttons frequently report isClickable()==false
-            // while still exposing ACTION_CLICK as a semantic action. Accept the
-            // node if it (or an ancestor) is actionable in either sense.
+            if (isExcluded(node)) {
+                return false;
+            }
             return supportsClick(node) || nearestClickable(node) != null;
         } catch (Throwable t) {
-            Log.w(TAG, "ERR matchesSend: " + t.getClass().getSimpleName());
             return false;
         }
+    }
+
+    private int candidateScore(AccessibilityNodeInfo node, int screenWidth) {
+        int score = 0;
+        try {
+            if (isExactSendMatch(node)) {
+                score += 100;
+            }
+            Rect bounds = new Rect();
+            node.getBoundsInScreen(bounds);
+            if (screenWidth > 0 && bounds.centerX() > screenWidth * 0.6f) {
+                score += 10;
+            }
+            score += Math.min(9, (bounds.width() * bounds.height()) / 10000);
+        } catch (Throwable t) {
+            // ignore
+        }
+        return score;
     }
 
     /** Walks up to the nearest ancestor that can receive an ACTION_CLICK. */
@@ -246,6 +327,48 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
             if (lower.contains(kw)) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    private boolean containsExclude(CharSequence value) {
+        if (value == null) {
+            return false;
+        }
+        String lower = value.toString().toLowerCase(java.util.Locale.US);
+        for (String kw : EXCLUDE_KEYWORDS) {
+            if (lower.contains(kw.toLowerCase(java.util.Locale.US))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isExcluded(AccessibilityNodeInfo node) {
+        try {
+            return containsExclude(node.getContentDescription())
+                    || containsExclude(node.getText());
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private boolean isExactSendMatch(AccessibilityNodeInfo node) {
+        try {
+            for (CharSequence value : new CharSequence[]{
+                    node.getContentDescription(), node.getText()}) {
+                if (value == null) {
+                    continue;
+                }
+                String s = value.toString().trim().toLowerCase(java.util.Locale.US);
+                for (String kw : SEND_KEYWORDS) {
+                    if (s.equals(kw.toLowerCase(java.util.Locale.US))) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            // ignore
         }
         return false;
     }
