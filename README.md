@@ -25,8 +25,9 @@
 - **滑到工具栏 → 真正执行对应动作**：
   - `GO / SEARCH / SEND / SEND_EXPRESSION` 走 `AsrManager.t(ordinal, now)`（等 ASR 整理结果后再触发，跟豆包空格长按发送同路径）
   - `NEXT / DONE / PREVIOUS / NONE` 走快路径（`p0(false,"") + KEYCODE_ENTER`），换行响应在 200ms 内
-- **滑出键盘 → 撤回输入**：清掉 preedit + 抑制所有 ASR commit 1.2s
-- **跨应用发送（Claude / ChatGPT）**：这类应用的"发送"挂在前端按钮 `onClick` 上、对 IME 动作无回调，IME 层发不出去。模块自带一个 **AccessibilityService**：滑到工具栏松手时先上屏文字，再让无障碍服务找到当前应用的发送按钮并模拟点击（兼容 WebView 与 Jetpack Compose 的语义点击）。需单独授权无障碍（见安装步骤）
+- **滑出键盘 → 撤回输入**：清掉 preedit + 抑制所有 ASR commit 0.5s
+- **跨应用发送（Claude / ChatGPT / Gemini / Grok / Kimi 等）**：这类应用的"发送"挂在前端按钮 `onClick` 上、对 IME 动作无回调，IME 层发不出去。模块自带一个 **AccessibilityService**：滑到工具栏松手时先上屏文字，再让无障碍服务找到当前应用的发送按钮并模拟点击（兼容 WebView 与 Jetpack Compose 的语义点击，含排除词过滤 + 优先级排序防止误击附件按钮）。需单独授权无障碍（见安装步骤）
+- **前台服务保活**：无障碍服务以前台服务运行，在 ColorOS / OxygenOS 等激进后台管理系统下显著降低被杀概率；重启后通过 root shell 自动恢复授权（需 root）
 - **图标徽章 UI**：横向 LinearLayout，复用豆包自家 `oic_send` / `oic_search` / `oic_enter` 图标 + `ic_delete_white`（豆包退格上滑清空那个垃圾桶），间距从豆包候选框 padding 资源动态读取，跟豆包视觉风格一致
 - **跟随豆包"按键震动"设置**，复用 `UserInteractiveManagerNext.g(.., SPEECH_START, ..)` 调用链
 - **修复了按键残留高亮**，触发时补发 `nativeTouch(ACTION_CANCEL)` 让 native 立刻清掉 pressed 状态
@@ -47,7 +48,8 @@
 | 屏幕分辨率 / 尺寸 | 任意（手机、平板） | 所有几何判定基于 ratio (`y/h`, `x/w`)，与分辨率无关 |
 | 横屏 / 平板 | 🚧 不主动适配 | 豆包横屏默认走浮动键盘，浮动模式本来就被排除；如果你的设备/版本是横屏全键盘，几何判定理论上还有效 |
 | 浮动键盘 / 单手模式 | 🚫 **不支持**（自动跳过） | 几何比例不固定，强行触发会误判 |
-| 跨应用发送（a11y） | **Claude** (`com.anthropic.claude`) + **ChatGPT** (`com.openai.chatgpt`) 实测可发送 | 发送按钮选择器按"内容描述/文本含 send/发送 + 可点击/语义 ACTION_CLICK"匹配；其它应用版本可能需补选择器（服务在找不到时会把候选节点 dump 到 logcat 便于扩展） |
+| 跨应用发送（a11y） | **Claude** (`com.anthropic.claude`) + **ChatGPT** (`com.openai.chatgpt`) 实测可发送；**Gemini / Grok / Kimi** 已预注册待真机验证 | 发送按钮选择器：收集全部候选节点 + 排除词过滤（图片/文件/attachment 等）+ 优先级排序（精确匹配 > 右侧 > 更大面积）；找不到时 dump 候选到 logcat 便于扩展 |
+| 跨应用发送（performEditorAction） | **Nekogram** (`tw.nekomimi.nekogram`) + **Telegram** (`org.telegram.messenger`) + **文心一言** (`com.baidu.ernie`) 走 IME SEND 动作 | 原生 View 输入框直接 performEditorAction，无需无障碍授权 |
 
 **适配范围说明**：这个模块只针对**普通竖屏全宽键盘**做适配，是绝大多数使用场景。横屏 / 浮动 / 单手等小众场景目前不支持，未来视需求扩展。
 
@@ -101,7 +103,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ### Hook 3：cancel 抑制窗口
 豆包 toolbar press-and-hold 模式 (`case 6/7`) **没有真正的 cancel API**。我们的策略：
-1. 打开 1200 ms `sCancelUntilElapsed` 抑制窗口
+1. 打开 500 ms `sCancelUntilElapsed` 抑制窗口（cancel 通常在 200-400ms 完成）
 2. 立刻调 `KeyboardJni.finishPreedit(false)` 清掉 InputConnection composing 文本
 3. 调 `AsrManager.p0(true, "cancel")` 停 ASR
 4. 窗口内 hook 三个 commit 入口并按需吞掉：
@@ -130,7 +132,8 @@ Hook `ImeService.onFinishInput()` 和 `onFinishInputView(boolean)` 清掉所有 
 - 仅对豆包 **v1.3.11** 实测过。其它版本可能因混淆字段重命名失效（不会崩，只会该功能不工作）。
 - 横向滑出 cancel 失效：豆包 KeyboardView 在常规设备上横向铺满全屏，系统会把 x 钳到边界。**仅支持向上 / 向下滑出 cancel**。
 - "整理"效果依赖豆包 ASR 引擎自身能力（标点、同音字纠正等），不是 LLM 级别的语义改写。LLM 候选窗 (`LLMCandidate.updateCandidateList`) 不在本模块范围内。
-- 跨应用发送（a11y）目前实测 **Claude / ChatGPT**；发送按钮选择器是基于"含 send/发送 + 可点击"的启发式匹配，应用大改版或新增应用可能需要补选择器（服务找不到时会把当前界面的候选节点 dump 到 logcat：`adb logcat -s DoubaoVoiceSend`）。需手动授权无障碍服务。
+- 跨应用发送（a11y）目前实测 **Claude / ChatGPT**；**Gemini / Grok / Kimi** 已预注册但未真机验证。选择器含排除词过滤 + 优先级排序，但应用大改版后节点结构可能变化（服务找不到时会把当前界面候选节点 dump 到 logcat：`adb logcat -s DoubaoVoiceSend`）。需手动授权无障碍服务。
+- 跨应用发送（performEditorAction）目前已适配 **Telegram / 文心一言**，但未全面真机验证；版本或区域不同的包体可能走不同路径。
 
 ## 🤝 贡献
 
