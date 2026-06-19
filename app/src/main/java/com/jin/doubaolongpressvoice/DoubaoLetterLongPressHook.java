@@ -113,7 +113,7 @@ public final class DoubaoLetterLongPressHook {
     private static final String ASR_PROCESS_CLS =
             "com.bytedance.android.input.speech.z";
     private static final String ASR_ALL_BACK_LISTENER_CLS =
-            "com.bytedance.android.input.speech.L$a";
+            "com.bytedance.android.input.speech.L.a";
     private static final String EDITOR_VIEW_INFO =
             "com.bytedance.android.input.speech.view.o";
     private static final String DOUBAO_PACKAGE = "com.bytedance.android.doubaoime";
@@ -1095,13 +1095,35 @@ public final class DoubaoLetterLongPressHook {
             return null;
         }
         sListenerClsResolveAttempted = true;
+        // Try hardcoded name first.
         try {
             sListenerCls = XposedHelpers.findClass(ASR_ALL_BACK_LISTENER_CLS, cl);
-            log("L$a listener class resolved: " + (sListenerCls != null));
+            if (sListenerCls != null) {
+                log("L$a resolved by name");
+                return sListenerCls;
+            }
+        } catch (Throwable ignore) {}
+        // Fallback: discover the interface by inspecting AsrProcess.w() parameter type.
+        // Avoids dependence on obfuscated class name across Doubao versions.
+        try {
+            Object proc = ensureAsrProcess(cl);
+            if (proc != null) {
+                for (java.lang.reflect.Method m : proc.getClass().getDeclaredMethods()) {
+                    if ("w".equals(m.getName()) && m.getParameterCount() == 1) {
+                        Class<?> param = m.getParameterTypes()[0];
+                        if (param.isInterface()) {
+                            sListenerCls = param;
+                            log("L$a discovered via AsrProcess.w() param: " + param.getName());
+                            return sListenerCls;
+                        }
+                    }
+                }
+            }
         } catch (Throwable t) {
-            log("ERR ensureListenerCls: " + t.getClass().getSimpleName());
+            log("ERR ensureListenerCls discover: " + t.getClass().getSimpleName());
         }
-        return sListenerCls;
+        log("ERR ensureListenerCls: not found");
+        return null;
     }
 
     private static void safeW(Object proc, Class<?> lcls, Object listener) {

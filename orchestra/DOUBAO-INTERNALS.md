@@ -42,11 +42,12 @@
 
 权威信号不是 `KeyboardJni.onAsrSetPreedit()` 静默，而是 AsrProcess 的 all-back listener：
 
-- 接口：`com.bytedance.android.input.speech.L.a`
+- 接口：`com.bytedance.android.input.speech.L.a`（`L` 是包名，`a` 是类名，**不是** `L$a` 内部类）
 - 方法：`void a(com.bytedance.android.input.speech.s asrCallBackInfo)`
 - 注册点：`com.bytedance.android.input.speech.z.w(L.a listener)`
 - `AsrManager.t()` 内部 listener 类：`com.bytedance.android.input.speech.AsrManager$b`
 - 完成判断：`asrCallBackInfo.g() == true`
+- **注意**：`XposedHelpers.findClass("com.bytedance.android.input.speech.L.a", cl)` 直接按全限定名查找即可；运行时已验证（2026-06-20 一加 15 v1.3.11）
 
 `s.g()` 对应 `AsrCallbackInfo` 最后一个 boolean 字段。构造来源在 `com.bytedance.android.input.speech.A` 的 stream callback：SDK callback 的 `isFinish` 为 true 时，构造 `new s(..., isStreamFinish, ..., isFinish)`，并调用 `AsrContext.a.T(1, true)`。二段结果到齐时另有 `AsrContext.a.T(2, true)`。
 
