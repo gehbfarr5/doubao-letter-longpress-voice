@@ -1,6 +1,9 @@
 package com.jin.doubaolongpressvoice;
 
 import android.accessibilityservice.AccessibilityService;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -57,16 +60,23 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
     protected void onServiceConnected() {
         super.onServiceConnected();
         registerSendReceiver();
+        startKeepAliveForeground();
     }
 
     @Override
     public boolean onUnbind(Intent intent) {
+        stopForeground(true);
         unregisterSendReceiver();
         return super.onUnbind(intent);
     }
 
     @Override
     public void onDestroy() {
+        try {
+            stopForeground(true);
+        } catch (Throwable t) {
+            // ignore
+        }
         unregisterSendReceiver();
         super.onDestroy();
     }
@@ -110,6 +120,38 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
             Log.i(TAG, "a11y send receiver registered");
         } catch (Throwable t) {
             Log.w(TAG, "ERR register receiver: " + Log.getStackTraceString(t));
+        }
+    }
+
+    private void startKeepAliveForeground() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                NotificationChannel ch = new NotificationChannel(
+                        "doubao_voice_send",
+                        "豆包语音发送",
+                        NotificationManager.IMPORTANCE_MIN);
+                ch.setShowBadge(false);
+                NotificationManager nm =
+                        (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                if (nm != null) {
+                    nm.createNotificationChannel(ch);
+                }
+            }
+            Notification.Builder builder;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                builder = new Notification.Builder(this, "doubao_voice_send");
+            } else {
+                builder = new Notification.Builder(this);
+            }
+            Notification n = builder
+                    .setContentTitle("豆包语音发送助手运行中")
+                    .setSmallIcon(android.R.drawable.ic_menu_send)
+                    .setOngoing(true)
+                    .build();
+            startForeground(1, n);
+            Log.i(TAG, "startForeground ok");
+        } catch (Throwable t) {
+            Log.w(TAG, "ERR startForeground: " + t.getClass().getSimpleName());
         }
     }
 

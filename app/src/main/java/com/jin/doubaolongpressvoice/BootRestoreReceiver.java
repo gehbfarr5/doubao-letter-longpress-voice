@@ -12,7 +12,7 @@ public class BootRestoreReceiver extends BroadcastReceiver {
     private static final String SCRIPT =
             "cur=$(settings get secure enabled_accessibility_services); "
                     + "comp=\\\"" + COMPONENT + "\\\"; "
-                    + "if echo \\\"$cur\\\" | grep -q \\\"$comp\\\"; then exit 0; fi; "
+                    + "if echo \\\"$cur\\\" | grep -qF \\\"$comp\\\" 2>/dev/null; then exit 0; fi; "
                     + "if [ -z \\\"$cur\\\" ] || [ \\\"$cur\\\" = \\\"null\\\" ]; then "
                     + "settings put secure enabled_accessibility_services \\\"$comp\\\"; "
                     + "else "
