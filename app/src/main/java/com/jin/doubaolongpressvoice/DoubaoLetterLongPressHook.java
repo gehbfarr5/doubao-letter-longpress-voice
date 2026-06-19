@@ -110,6 +110,10 @@ public final class DoubaoLetterLongPressHook {
             "com.bytedance.android.input.common.VibrationController";
     private static final String ASR_MANAGER =
             "com.bytedance.android.input.speech.AsrManager";
+    private static final String ASR_PROCESS_CLS =
+            "com.bytedance.android.input.speech.z";
+    private static final String ASR_ALL_BACK_LISTENER_CLS =
+            "com.bytedance.android.input.speech.L$a";
     private static final String EDITOR_VIEW_INFO =
             "com.bytedance.android.input.speech.view.o";
     private static final String DOUBAO_PACKAGE = "com.bytedance.android.doubaoime";
@@ -295,6 +299,10 @@ public final class DoubaoLetterLongPressHook {
     private static volatile boolean sFeedbackResolveOk;
     private static volatile Object sAsrManager;
     private static volatile boolean sAsrResolveAttempted;
+    private static volatile Object sAsrProcess;
+    private static volatile boolean sAsrProcessResolveAttempted;
+    private static volatile Class<?> sListenerCls;
+    private static volatile boolean sListenerClsResolveAttempted;
     private static ClassLoader sClassLoader;
 
     private static final Handler sMainHandler = new Handler(Looper.getMainLooper());
@@ -686,6 +694,8 @@ public final class DoubaoLetterLongPressHook {
      * target app's visible send button.
      */
     private static void dispatchViaA11ySend(final ClassLoader cl, final String pkg) {
+        // Register listener BEFORE p0() to avoid missing the all-back callback.
+        subscribeAsrAllBackThen(cl, NEWLINE_ASR_MAX_WAIT_MS, () -> broadcastA11ySend(cl, pkg));
         Object mgr = ensureAsrManager(cl);
         if (mgr != null) {
             try {
@@ -695,11 +705,6 @@ public final class DoubaoLetterLongPressHook {
                 log("ERR p0() a11y: " + e.getClass().getSimpleName());
             }
         }
-        pollAsrSettleThen(cl,
-                NEWLINE_ASR_SETTLE_MS,
-                NEWLINE_ASR_MAX_WAIT_MS,
-                SystemClock.elapsedRealtime(),
-                () -> broadcastA11ySend(cl, pkg));
     }
 
     /**
@@ -740,6 +745,8 @@ public final class DoubaoLetterLongPressHook {
      * text waits longer. See {@link #pollAsrSettleAndEnter}.
      */
     private static void dispatchNewlineFast(final ClassLoader cl) {
+        // Register listener BEFORE p0() to avoid missing the all-back callback.
+        subscribeAsrAllBackThen(cl, NEWLINE_ASR_MAX_WAIT_MS, () -> sendEnterKey(cl));
         Object mgr = ensureAsrManager(cl);
         if (mgr != null) {
             try {
@@ -749,10 +756,6 @@ public final class DoubaoLetterLongPressHook {
                 log("ERR p0(): " + e.getClass().getSimpleName());
             }
         }
-        pollAsrSettleAndEnter(cl,
-                NEWLINE_ASR_SETTLE_MS,
-                NEWLINE_ASR_MAX_WAIT_MS,
-                SystemClock.elapsedRealtime());
     }
 
     /**
@@ -1064,6 +1067,130 @@ public final class DoubaoLetterLongPressHook {
             log("ERR ensureAsrManager: " + Log.getStackTraceString(t));
         }
         return sAsrManager;
+    }
+
+    private static Object ensureAsrProcess(ClassLoader cl) {
+        if (sAsrProcess != null) {
+            return sAsrProcess;
+        }
+        if (sAsrProcessResolveAttempted) {
+            return null;
+        }
+        sAsrProcessResolveAttempted = true;
+        try {
+            Class<?> cls = XposedHelpers.findClass(ASR_MANAGER, cl);
+            sAsrProcess = XposedHelpers.getStaticObjectField(cls, "b");
+            log("AsrProcess resolved: " + (sAsrProcess != null));
+        } catch (Throwable t) {
+            log("ERR ensureAsrProcess: " + t.getClass().getSimpleName());
+        }
+        return sAsrProcess;
+    }
+
+    private static Class<?> ensureListenerCls(ClassLoader cl) {
+        if (sListenerCls != null) {
+            return sListenerCls;
+        }
+        if (sListenerClsResolveAttempted) {
+            return null;
+        }
+        sListenerClsResolveAttempted = true;
+        try {
+            sListenerCls = XposedHelpers.findClass(ASR_ALL_BACK_LISTENER_CLS, cl);
+            log("L$a listener class resolved: " + (sListenerCls != null));
+        } catch (Throwable t) {
+            log("ERR ensureListenerCls: " + t.getClass().getSimpleName());
+        }
+        return sListenerCls;
+    }
+
+    private static void safeW(Object proc, Class<?> lcls, Object listener) {
+        try {
+            XposedHelpers.callMethod(proc, "w",
+                    new Class<?>[]{lcls}, new Object[]{listener});
+        } catch (Throwable ignore) {
+        }
+    }
+
+    /**
+     * Replaces {@link #pollAsrSettleThen}: registers a one-shot {@code L$a}
+     * all-back listener on {@code AsrManager.b} (AsrProcess). When
+     * {@code s.g()==true} fires the terminal action runs on the main thread.
+     * Falls back to {@link #pollAsrSettleThen} if listener or AsrProcess
+     * cannot be resolved, or if {@code z.w()} throws.
+     *
+     * <p>Register BEFORE calling {@code p0()} so the all-back event is not missed.
+     */
+    private static void subscribeAsrAllBackThen(
+            final ClassLoader cl, final long maxWaitMs, final Runnable terminal) {
+        Object proc = ensureAsrProcess(cl);
+        Class<?> lcls = ensureListenerCls(cl);
+        if (proc == null || lcls == null) {
+            log("subscribeAsrAllBack: fallback poll (proc=" + (proc != null)
+                    + " lcls=" + (lcls != null) + ")");
+            pollAsrSettleThen(cl, NEWLINE_ASR_SETTLE_MS, maxWaitMs,
+                    SystemClock.elapsedRealtime(), terminal);
+            return;
+        }
+
+        final boolean[] done = {false};
+        final Runnable[] timeoutRef = {null};
+        Object listener;
+        try {
+            listener = java.lang.reflect.Proxy.newProxyInstance(
+                    cl,
+                    new Class<?>[]{lcls},
+                    (proxy, method, args) -> {
+                        if (!"a".equals(method.getName())
+                                || args == null || args.length != 1) {
+                            return null;
+                        }
+                        try {
+                            boolean allBack =
+                                    (Boolean) XposedHelpers.callMethod(args[0], "g");
+                            if (!allBack || done[0]) {
+                                return null;
+                            }
+                            done[0] = true;
+                            if (timeoutRef[0] != null) {
+                                sMainHandler.removeCallbacks(timeoutRef[0]);
+                            }
+                            safeW(proc, lcls, null);
+                            sMainHandler.post(terminal);
+                            log("asr-allback: s.g()=true -> terminal");
+                        } catch (Throwable t) {
+                            log("ERR allBack listener: " + t.getClass().getSimpleName());
+                        }
+                        return null;
+                    });
+        } catch (Throwable t) {
+            log("ERR Proxy L$a: " + t.getClass().getSimpleName() + " -> poll fallback");
+            pollAsrSettleThen(cl, NEWLINE_ASR_SETTLE_MS, maxWaitMs,
+                    SystemClock.elapsedRealtime(), terminal);
+            return;
+        }
+
+        Runnable timeout = () -> {
+            if (done[0]) {
+                return;
+            }
+            done[0] = true;
+            safeW(proc, lcls, null);
+            log("asr-allback: TIMEOUT " + maxWaitMs + "ms -> terminal");
+            terminal.run();
+        };
+        timeoutRef[0] = timeout;
+        try {
+            XposedHelpers.callMethod(proc, "w",
+                    new Class<?>[]{lcls}, new Object[]{listener});
+            sMainHandler.postDelayed(timeout, maxWaitMs);
+            log("asr-allback: listener registered timeout=" + maxWaitMs + "ms");
+        } catch (Throwable t) {
+            log("ERR asrProcess.w(): " + t.getClass().getSimpleName() + " -> poll fallback");
+            sMainHandler.removeCallbacks(timeout);
+            pollAsrSettleThen(cl, NEWLINE_ASR_SETTLE_MS, maxWaitMs,
+                    SystemClock.elapsedRealtime(), terminal);
+        }
     }
 
     // ===== Generic helpers =====
