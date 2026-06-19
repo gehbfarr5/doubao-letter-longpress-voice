@@ -51,6 +51,9 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
         PACKAGE_SEND_VIEW_ID = new java.util.HashMap<>();
         PACKAGE_SEND_VIEW_ID.put("com.anthropic.claude", null);
         PACKAGE_SEND_VIEW_ID.put("com.openai.chatgpt", null);
+        PACKAGE_SEND_VIEW_ID.put("com.google.android.apps.bard", null);
+        PACKAGE_SEND_VIEW_ID.put("ai.x.grok", null);
+        PACKAGE_SEND_VIEW_ID.put("com.moonshot.kimichat", null);
     }
 
     private BroadcastReceiver mReceiver;

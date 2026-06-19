@@ -160,11 +160,17 @@ public final class DoubaoLetterLongPressHook {
      * See orchestra/ADAPT-PLAYBOOK.md for the full adaptation flow.
      */
     private static final java.util.Set<String> FORCE_SEND_PACKAGES =
-            java.util.Collections.singleton("tw.nekomimi.nekogram");
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "tw.nekomimi.nekogram",
+                    "org.telegram.messenger",
+                    "com.baidu.ernie"));
     private static final java.util.Set<String> A11Y_SEND_PACKAGES =
             new java.util.HashSet<>(java.util.Arrays.asList(
                     "com.anthropic.claude",
-                    "com.openai.chatgpt"));
+                    "com.openai.chatgpt",
+                    "com.google.android.apps.bard",
+                    "ai.x.grok",
+                    "com.moonshot.kimichat"));
 
     /** {@code EditorInfo.IME_ACTION_SEND} ordinal — used for force-send override. */
     private static final int IME_ACTION_SEND_ORDINAL = 4;
