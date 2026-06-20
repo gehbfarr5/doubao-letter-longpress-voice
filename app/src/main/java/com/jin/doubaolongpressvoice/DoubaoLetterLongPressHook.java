@@ -77,7 +77,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *
  * <h2>Cancel path</h2>
  * Doubao's "toolbar voice" entry (case 6/7) has no native cancel. We open a
- * 1.2 s suppression window when the user releases off-keyboard:
+ * 0.5 s suppression window when the user releases off-keyboard:
  * <ul>
  *   <li>{@code KeyboardJni.commitString(text, _, source)} is swallowed unless
  *       {@code source} is in a user-input whitelist (typing / clipboard /
@@ -120,8 +120,6 @@ public final class DoubaoLetterLongPressHook {
 
     private static final int MSG_LONGPRESS = 1;
     private static final int DO_FUNCTION_KEY_VOICE_START = 6;
-    private static final int DO_FUNCTION_KEY_VOICE_STOP = 7;
-    private static final int DO_FUNCTION_KEY_SEND_ACTION = 2;   // doSendAction()
     private static final int ACTION_CANCEL = MotionEvent.ACTION_CANCEL;
     private static final String ASR_CANCEL_REASON = "cancel";
     private static final long CANCEL_WINDOW_MS = 500L;
@@ -691,16 +689,6 @@ public final class DoubaoLetterLongPressHook {
     }
 
     /**
-     * Commit path: invoke {@code AsrManager.p0(false, "")} directly — mirrors
-     * what {@code AsrEditorLayoutView} does when the user taps the in-panel
-     * stop button. This skips the {@code P(0)} interrupt that
-     * {@code DoFunctionKey(7)} would otherwise inject, allowing Doubao's ASR
-     * engine to finalize naturally (tail buffer + punctuation/post-processing).
-     *
-     * If the {@code p0} reflection fails, falls back to {@code forceVad()} +
-     * delayed {@code DoFunctionKey(7)} for safety.
-     */
-    /**
      * Toolbar release dispatcher. Splits by enterActionType:
      * <ul>
      *   <li><b>Specific send action</b> (GO / SEARCH / SEND / SEND_EXPRESSION):
@@ -795,7 +783,7 @@ public final class DoubaoLetterLongPressHook {
      * {@code onAsrSetPreedit}/{@code onAsrCommitPreeditText} hooks) and only
      * fire ENTER after callbacks have been quiet for
      * {@link #NEWLINE_ASR_SETTLE_MS}. Adaptive: short text fires fast, long
-     * text waits longer. See {@link #pollAsrSettleAndEnter}.
+     * text waits longer. See {@link #pollAsrSettleThen}.
      */
     private static void dispatchNewlineFast(final ClassLoader cl) {
         // Register listener BEFORE p0() to avoid missing the all-back callback.
@@ -826,13 +814,6 @@ public final class DoubaoLetterLongPressHook {
      * Re-schedules itself every {@link #NEWLINE_ASR_POLL_MS}. Capped at
      * {@code maxWaitMs} as a timeout fallback so we never hang.
      */
-    private static void pollAsrSettleAndEnter(final ClassLoader cl,
-                                              final long settleMs,
-                                              final long maxWaitMs,
-                                              final long startTs) {
-        pollAsrSettleThen(cl, settleMs, maxWaitMs, startTs, () -> sendEnterKey(cl));
-    }
-
     private static void pollAsrSettleThen(final ClassLoader cl,
                                           final long settleMs,
                                           final long maxWaitMs,
@@ -937,16 +918,6 @@ public final class DoubaoLetterLongPressHook {
         }
     }
 
-    private static void stopVoiceCommitFallback(ClassLoader cl) {
-        try {
-            Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
-            XposedHelpers.callStaticMethod(jni, "DoFunctionKey", DO_FUNCTION_KEY_VOICE_STOP);
-            log("DoFunctionKey(7) fallback fired");
-        } catch (Throwable t) {
-            log("ERR DoFunctionKey(7): " + Log.getStackTraceString(t));
-        }
-    }
-
     private static void cancelVoice(ClassLoader cl) {
         sCancelUntilElapsed = SystemClock.elapsedRealtime() + CANCEL_WINDOW_MS;
         try {
@@ -965,19 +936,6 @@ public final class DoubaoLetterLongPressHook {
         }
         // Diagnostic probe: log whether L.a all-back fires on cancel (does NOT change behavior).
         subscribeAsrAllBackThen(cl, 2000L, null);
-    }
-
-    private static void forceVad(ClassLoader cl) {
-        Object mgr = ensureAsrManager(cl);
-        if (mgr == null) {
-            return;
-        }
-        try {
-            XposedHelpers.callMethod(mgr, "x");
-            log("AsrManager.x() forceVad fired (fallback)");
-        } catch (Throwable t) {
-            log("ERR forceVad: " + t.getClass().getSimpleName());
-        }
     }
 
     private static void cancelPendingCommit() {
@@ -1613,16 +1571,6 @@ public final class DoubaoLetterLongPressHook {
             return (v instanceof Integer) ? (Integer) v : -1;
         } catch (Throwable t) {
             return -1;
-        }
-    }
-
-    private static int readCurrentEditboxAction(ClassLoader cl) {
-        try {
-            Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
-            Object v = XposedHelpers.getStaticObjectField(jni, "mCurrentEditboxAction");
-            return (v instanceof Integer) ? (Integer) v : 0;
-        } catch (Throwable t) {
-            return 0;
         }
     }
 

@@ -44,7 +44,13 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
     /**
      * Known stable resource-id for the send button, keyed by package name.
      * null = no stable id available for this package (fall back to heuristic).
-     * Populated from real-device logcat dumps; update when apps change.
+     *
+     * NOTE: every entry is currently {@code null} — the per-package viewId
+     * fast path in {@link #performSend} is a reserved placeholder and never
+     * fires yet. All sends go through the keyword heuristic in
+     * {@link #findSendNode}. Populate these from real-device logcat dumps
+     * (run with {@code adb logcat -s DoubaoVoiceSend} and read the node dump)
+     * to enable exact-match clicking; update when apps change.
      */
     private static final java.util.Map<String, String> PACKAGE_SEND_VIEW_ID;
     static {
