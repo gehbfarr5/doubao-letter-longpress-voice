@@ -1,0 +1,11 @@
+# ts	tool	model	status	in_tok	out_tok	total_tok	usd	project	slug
+2026-06-17 11:22:29	codex	gpt-5.4	EXEC_DONE	-	-	45915	-	/Users/jin/Documents/oss/doubao-letter-longpress-voice	task-current
+2026-06-20 01:01:50	codex	gpt-5.4	EXEC_DONE	-	-	37551	-	/Users/jin/Documents/oss/doubao-letter-longpress-voice	HANDOFF-a11y-keepalive-layer1
+2026-06-20 01:10:20	codex	gpt-5.5	EXEC_AUTH	-	-	183029	-	/Users/jin/Documents/oss/doubao-letter-longpress-voice	HANDOFF-doubao-internals
+2026-06-20 01:22:06	codex	gpt-5.5	EXEC_DONE	-	-	34745	-	/Users/jin/Documents/oss/doubao-letter-longpress-voice	HANDOFF-poll-to-listener
+2026-06-20 01:43:42	codex	gpt-5.5	EXEC_DONE	-	-	47925	-	/Users/jin/Documents/oss/doubao-letter-longpress-voice	HANDOFF-batch1-cleanup
+2026-06-20 01:48:12	codex	medium	EXEC_ERR	-	-	-	-	/Users/jin/Documents/oss/doubao-letter-longpress-voice	HANDOFF-batch2-hook-improve
+2026-06-20 01:50:17	codex	gpt-5.4	EXEC_DONE	-	-	44886	-	/Users/jin/Documents/oss/doubao-letter-longpress-voice	HANDOFF-batch2-hook-improve
+2026-06-20 01:53:09	codex	gpt-5.4	EXEC_DONE	-	-	17832	-	/Users/jin/Documents/oss/doubao-letter-longpress-voice	HANDOFF-batch3-cancel
+2026-06-20 01:56:25	codex	gpt-5.4	EXEC_DONE	-	-	35698	-	/Users/jin/Documents/oss/doubao-letter-longpress-voice	HANDOFF-batch4-a11y-selector
+2026-06-20 01:58:47	codex	gpt-5.4	EXEC_DONE	-	-	20863	-	/Users/jin/Documents/oss/doubao-letter-longpress-voice	HANDOFF-batch5-keepalive
