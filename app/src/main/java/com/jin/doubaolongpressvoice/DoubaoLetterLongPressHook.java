@@ -101,6 +101,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class DoubaoLetterLongPressHook {
 
     private static final String TAG = "DoubaoLongPress";
+    private static final boolean DEBUG = false;
     private static final String KEYBOARD_VIEW = "com.bytedance.android.input.keyboard.KeyboardView";
     private static final String KEYBOARD_JNI = "com.bytedance.android.doubaoime.KeyboardJni";
     private static final String IME_SERVICE = "com.bytedance.android.doubaoime.ImeService";
@@ -285,6 +286,7 @@ public final class DoubaoLetterLongPressHook {
     private static volatile float sSwipeThresholdPxSq = -1f;
     private static volatile Runnable sPendingCommit;
     private static volatile Zone sCurrentZone = Zone.LETTER;
+    private static volatile int sRecordingEnterOrdinal = -1;
     private static volatile long sLastZoneChangeTs = 0L;
     private static volatile LinearLayout sOverlay;
     private static volatile ImageView sOverlayIcon;
@@ -396,6 +398,7 @@ public final class DoubaoLetterLongPressHook {
                                 sSuppressNextUp = true;
                                 sAsrStartConfirmed = false;
                                 sCurrentZone = Zone.LETTER;
+                                sRecordingEnterOrdinal = resolveEffectiveEnterOrdinal(cl);
                                 sLastZoneChangeTs = SystemClock.elapsedRealtime();
                                 param.setResult(null);
                                 triggerVoiceStart(cl);
@@ -665,6 +668,7 @@ public final class DoubaoLetterLongPressHook {
         sCancelUntilElapsed = 0L;
         sMaxDisplacementSq = 0f;
         sCurrentZone = Zone.LETTER;
+        sRecordingEnterOrdinal = -1;
         sCachedToolbarHeight = -1;
         cancelPendingCommit();
         LinearLayout ov = sOverlay;
@@ -1458,7 +1462,7 @@ public final class DoubaoLetterLongPressHook {
         sLastZoneChangeTs = now;
         // Make sure overlay exists (may be detached after lifecycle reset).
         ensureOverlay(cl, tbH);
-        int enterOrdinal = resolveEffectiveEnterOrdinal(cl);
+        int enterOrdinal = (sRecordingEnterOrdinal >= 0) ? sRecordingEnterOrdinal : resolveEffectiveEnterOrdinal(cl);
         updateOverlayForZone(next, enterOrdinal, cl);
         if (next == Zone.TOOLBAR || next == Zone.OUTSIDE) {
             performZoneSelectionFeedback();
@@ -1962,6 +1966,9 @@ public final class DoubaoLetterLongPressHook {
     }
 
     private static void log(String message) {
+        if (!DEBUG) {
+            return;
+        }
         Log.i(TAG, message);
         XposedBridge.log(TAG + ": " + message);
     }
