@@ -1,6 +1,7 @@
 package com.jin.doubaolongpressvoice;
 
 import android.accessibilityservice.AccessibilityService;
+import android.annotation.SuppressLint;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -57,9 +58,6 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
         PACKAGE_SEND_VIEW_ID = new java.util.HashMap<>();
         PACKAGE_SEND_VIEW_ID.put("com.anthropic.claude", null);
         PACKAGE_SEND_VIEW_ID.put("com.openai.chatgpt", null);
-        PACKAGE_SEND_VIEW_ID.put("com.google.android.apps.bard", null);
-        PACKAGE_SEND_VIEW_ID.put("ai.x.grok", null);
-        PACKAGE_SEND_VIEW_ID.put("com.moonshot.kimichat", null);
     }
 
     private BroadcastReceiver mReceiver;
@@ -98,6 +96,9 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
     public void onInterrupt() {
     }
 
+    // API 33+ uses RECEIVER_EXPORTED because the request is sent from the Doubao
+    // IME process. Older platform APIs do not expose receiver export flags.
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private void registerSendReceiver() {
         try {
             if (mReceiverRegistered) {
