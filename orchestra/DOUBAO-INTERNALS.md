@@ -1,8 +1,16 @@
 # Doubao IME 内部 Hook 点文档
 
-分析对象：豆包输入法 v1.3.11 (`com.bytedance.android.doubaoime`)。APK 来自本机恢复备份：
+主要分析对象：豆包输入法 v1.3.11 (`com.bytedance.android.doubaoime`)。APK 来自本机恢复备份：
 `/Users/jin/Desktop/oneplus15-reset-20260618/03_apps/apk/com.bytedance.android.doubaoime/base.apk`，
 已复制为 `/tmp/doubao.apk`，JADX 产物在 `/tmp/doubao-jadx`。直接 ADB/AndroMeld 取包在本次会话不可用，但备份 APK 与项目 README 记录的实测版本一致。
+
+2026-07-09 追加 v1.3.14 真机适配记录：手机包 `versionName=1.3.14`
+(`versionCode=100314018`)，APK 拉取到 `/tmp/doubao-1.3.14.apk`，JADX
+产物为 `/tmp/doubao-jadx-1.3.14`。该版本里旧 `p0(boolean,String)`
+实例方法重命名为 `s0(boolean,String)`；中间/底部松手从旧 `q0()` 改为
+`t0()`，其内部 150ms 后调用 `s0(false, "send")`；右侧发送入口
+`t(int,long)` 仍有效。`KeyboardJni.getToolbarHeight()` 在实测 26 键界面
+返回 0，因此模块需要用 KeyboardView 顶部比例兜底识别 ASR 工具栏区域。
 
 ## ASR Manager
 
@@ -183,6 +191,12 @@ touch/action 路径：
 - 左侧 rollback：`h.invoke()` 调 `AsrManager.a.u()` + `InputView.R(false)`
 - 右侧 send：`j.invoke()` 调 `InputView.R(false)` + `AsrManager.a.t(f3162c, now)`
 - 右侧 hover/move：`i.invoke()` 震动并节流调用 `AsrManager.a.x()` forceVad
+
+v1.3.14 差异：
+
+- 中间/底部松手：`AsrLongPressView.onTouchEvent(ACTION_UP)` 调 `InputView.T(false)` + `AsrManager.a.t0()`
+- `t0()` 记录 `LongPressStop`，调用 `AsrProcess.u()`，150ms 后 `AsrManager.a.s0(false, "send")`
+- stop/cancel 入口统一为 `s0(boolean noWaitResult, String from)`
 
 标签选择在 `onVisibilityChanged` 中完成：
 

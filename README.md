@@ -24,14 +24,14 @@
 - **跟随当前输入框 `EnterActionType` 显示语义化标签**：发送 / 搜索 / 前往 / 换行 / 完成 — 与豆包空格长按弹出的"右侧按钮"保持一致
 - **滑到工具栏 → 真正执行对应动作**：
   - `GO / SEARCH / SEND / SEND_EXPRESSION` 走 `AsrManager.t(ordinal, now)`（等 ASR 整理结果后再触发，跟豆包空格长按发送同路径）
-  - `NEXT / DONE / PREVIOUS / NONE` 走快路径（`p0(false,"") + KEYCODE_ENTER`），换行响应在 200ms 内
+  - `NEXT / DONE / PREVIOUS / NONE` 走快路径（停止 ASR + `KEYCODE_ENTER`），换行响应在 200ms 内
 - **滑出键盘 → 撤回输入**：清掉 preedit + 抑制所有 ASR commit 0.5s
 - **跨应用发送（Claude / ChatGPT）**：这类应用的"发送"挂在前端按钮 `onClick` 上、对 IME 动作无回调，IME 层发不出去。模块自带一个 **AccessibilityService**：滑到工具栏松手时先上屏文字，再让无障碍服务找到当前应用的发送按钮并模拟点击（兼容 WebView 与 Jetpack Compose 的语义点击，含排除词过滤 + 优先级排序防止误击附件按钮）。需单独授权无障碍（见安装步骤）
 - **前台服务保活**：无障碍服务以前台服务运行，在 ColorOS / OxygenOS 等激进后台管理系统下显著降低被杀概率；重启后通过 root shell 自动恢复授权（需 root）
 - **图标徽章 UI**：横向 LinearLayout，复用豆包自家 `oic_send` / `oic_search` / `oic_enter` 图标 + `ic_delete_white`（豆包退格上滑清空那个垃圾桶），间距从豆包候选框 padding 资源动态读取，跟豆包视觉风格一致
 - **跟随豆包"按键震动"设置**，复用 `UserInteractiveManagerNext.g(.., SPEECH_START, ..)` 调用链
 - **修复了按键残留高亮**，触发时补发 `nativeTouch(ACTION_CANCEL)` 让 native 立刻清掉 pressed 状态
-- **commit 走 `AsrManager.q0()` / `p0(false, "")`**（与豆包语音面板内的停止按钮同一路径），让 ASR 引擎走自然 finalize 流程：尾字不丢、标点自动添加、同音字纠正
+- **commit 走豆包长按面板原生 stop 流程**（v1.3.14 为 `AsrManager.t0()` / `s0(false, ...)`，旧版兼容 `q0()` / `p0(false, "")`），让 ASR 引擎走自然 finalize 流程：尾字不丢、标点自动添加、同音字纠正
 - **滑动手势识别**（20dp 阈值，按设备 density 自适应），左右滑动光标移动手势不会误触发语音
 - **不破坏原生长按 popup**：数字/符号子层、Shift、Backspace、空格 等的原生长按行为完全保留
 - **防御性多层门槛**：数字/电话/日期输入框 → 跳过；`?123` 数字/符号子层 → 跳过；浮动/单手模式 → 跳过；几何不在字母区 → 跳过
@@ -40,7 +40,7 @@
 
 | 项 | 实测环境 | 备注 |
 |---|---|---|
-| 豆包输入法 | **v1.3.11** (`com.bytedance.android.doubaoime`) | 其它版本可能因混淆字段重命名 (`KeyboardView$c`、`UserInteractiveManagerNext.a`、`AsrManager.p0` 等) 而失效，所有反射访问都有 try-catch，失败只是该功能不可用、不会崩 |
+| 豆包输入法 | **v1.3.11 / v1.3.14** (`com.bytedance.android.doubaoime`) | v1.3.14 已适配 `AsrManager.s0/t0` 重命名和 `getToolbarHeight()==0` 的顶部工具栏判定；其它版本仍可能因混淆字段重命名失效，失败只影响该功能，不应导致输入法崩溃 |
 | Android | 6.0+ (API 23+) | 取决于 LSPosed 支持范围 |
 | LSPosed | 任意版本，xposedminversion=82 | |
 | 物理键盘布局 | **26 键 QWERTY**（拼音 / 自然码 / 双拼 / 英文）+ **9 宫格拼音** | 手写键盘走 `HandWritingBoardView`，**自动跳过** |
@@ -95,17 +95,17 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ### Hook 2：吞松手 + 三路 zone 决策
 在 `KeyboardView.onTouchEvent` 中标记 `sSuppressNextUp`，吞掉 `ACTION_UP / ACTION_CANCEL`，避免 native 把字母 commit 上屏。录音过程中根据手指 Y 坐标实时分三个 zone（带 50ms 防抖），松手后按当前 zone 决策：
-- **LETTER**（字母区内）→ `AsrManager.q0()`（带 150ms postDelayed → `p0(false,"")`），与豆包语音面板停止按钮同路径
+- **LETTER**（字母区内）→ 豆包长按面板 graceful stop（v1.3.14: `AsrManager.t0()`；旧版: `q0()`），与豆包语音面板停止按钮同路径
 - **TOOLBAR**（工具栏区域）→ 按 `EnterActionType`：
   - GO / SEARCH / SEND / SEND_EXPRESSION → `AsrManager.t(ordinal, now)`（等 ASR 整理结果再 perform action，跟豆包空格长按发送同路径）
-  - 其余（换行类）→ `p0(false,"") + 200ms postDelayed + KEYCODE_ENTER`（快路径，避免等 ASR 结果包）
+  - 其余（换行类）→ 停止 ASR 后 `KEYCODE_ENTER`（快路径，避免等 ASR 结果包）
 - **OUTSIDE**（键盘上/下方滑出）或 `ACTION_CANCEL` → 走自定义 cancel 抑制窗口
 
 ### Hook 3：cancel 抑制窗口
 豆包 toolbar press-and-hold 模式 (`case 6/7`) **没有真正的 cancel API**。我们的策略：
 1. 打开 500 ms `sCancelUntilElapsed` 抑制窗口（cancel 通常在 200-400ms 完成）
 2. 立刻调 `KeyboardJni.finishPreedit(false)` 清掉 InputConnection composing 文本
-3. 调 `AsrManager.p0(true, "cancel")` 停 ASR
+3. 调豆包 stop-ASR API（v1.3.14: `AsrManager.s0(true, "cancel")`；旧版: `p0(true, "cancel")`）停 ASR
 4. 窗口内 hook 三个 commit 入口并按需吞掉：
    - `KeyboardJni.commitString(text, _, source)` —— `source` 不在 `keyboard_callback / clipboard / emoji / ...` 白名单则吞
    - `KeyboardJni.onAsrCommitPreeditText()` —— 直接返 `true` 骗调用方"已提交"
@@ -129,7 +129,7 @@ Hook `ImeService.onFinishInput()` 和 `onFinishInputView(boolean)` 清掉所有 
 ## 📊 已知限制
 
 - 仅适配 **26 键 QWERTY + 9 宫格 Pinyin**。手写键盘自动跳过；浮动/单手模式自动跳过；横屏未主动适配（豆包横屏默认走浮动）。
-- 仅对豆包 **v1.3.11** 实测过。其它版本可能因混淆字段重命名失效（不会崩，只会该功能不工作）。
+- 仅对豆包 **v1.3.11 / v1.3.14** 实测过。其它版本可能因混淆字段重命名失效（不会崩，只会该功能不工作）。
 - 横向滑出 cancel 失效：豆包 KeyboardView 在常规设备上横向铺满全屏，系统会把 x 钳到边界。**仅支持向上 / 向下滑出 cancel**。
 - "整理"效果依赖豆包 ASR 引擎自身能力（标点、同音字纠正等），不是 LLM 级别的语义改写。LLM 候选窗 (`LLMCandidate.updateCandidateList`) 不在本模块范围内。
 - 跨应用发送（a11y）目前只支持并实测 **Claude / ChatGPT**。选择器含排除词过滤 + 优先级排序，但应用大改版后节点结构可能变化（服务找不到时会把当前界面候选节点 dump 到 logcat：`adb logcat -s DoubaoVoiceSend`）。需手动授权无障碍服务。

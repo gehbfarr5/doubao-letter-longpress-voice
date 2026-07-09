@@ -255,12 +255,11 @@ public final class DoubaoLetterLongPressHook {
     private static final float NINE_KEY_X_LEFT = 0.15f;
     private static final float NINE_KEY_X_RIGHT = 0.85f;
     private static final float ONE_HAND_WIDTH_RATIO = 0.85f;
-    // Top exclusion = toolbar / candidates bar / translation banner area.
-    // Doubao normally renders a one-row toolbar (AI / 翻译 / 剪贴板 ...) above the
-    // key rows; when the translation feature is on, the toolbar grows another row.
-    // We detect this by the KeyboardView h/w ratio (normal ≈ 0.74, tall ≈ 0.90+).
-    private static final float LETTER_TOP_NORMAL = 0.08f;
-    private static final float LETTER_TOP_TALL = 0.22f;
+    // Top exclusion = toolbar / candidates bar / ASR slide-action row.
+    // Doubao 1.3.14 can report getToolbarHeight() as 0 while still rendering a
+    // sizeable top action row. Fall back to ratios measured against KeyboardView.
+    private static final float TOOLBAR_TOP_NORMAL = 0.30f;
+    private static final float TOOLBAR_TOP_TALL = 0.34f;
     private static final float TALL_KBD_H_OVER_W = 0.85f;
 
     // Swipe detection threshold (dp; converted to px at runtime per device).
@@ -399,7 +398,7 @@ public final class DoubaoLetterLongPressHook {
                                 triggerVoiceStart(cl);
                                 sendCancelToNative(kvView, x, y);
                                 performSpeechStartFeedback();
-                                ensureOverlay(cl, toolbarHeight);
+                                ensureOverlay(cl, effectiveToolbarHeight(w, h, toolbarHeight));
                                 scheduleAsrStartVerification(cl);
                             } catch (Throwable t) {
                                 log("ERR handleMessage hook: " + Log.getStackTraceString(t));
@@ -705,7 +704,7 @@ public final class DoubaoLetterLongPressHook {
     private static void commitAndDispatchToolbarAction(final ClassLoader cl) {
         cancelPendingCommit();
         Object inputView = getInputView(cl);
-        callInputViewR(inputView, false);
+        callInputViewCloseAsrUi(inputView, false);
 
         String pkg = currentEditorPackageName(cl);
         if (pkg != null && A11Y_SEND_PACKAGES.contains(pkg)) {
@@ -738,12 +737,7 @@ public final class DoubaoLetterLongPressHook {
         subscribeAsrAllBackThen(cl, NEWLINE_ASR_MAX_WAIT_MS, () -> broadcastA11ySend(cl, pkg));
         Object mgr = ensureAsrManager(cl);
         if (mgr != null) {
-            try {
-                XposedHelpers.callMethod(mgr, "p0", false, "");
-                log("p0(false,\"\") fired (a11y send path pkg=" + pkg + ")");
-            } catch (Throwable e) {
-                log("ERR p0() a11y: " + e.getClass().getSimpleName());
-            }
+            callAsrStop(mgr, false, "", "a11y send path pkg=" + pkg);
         }
     }
 
@@ -770,7 +764,7 @@ public final class DoubaoLetterLongPressHook {
     }
 
     /**
-     * Newline-fast path: commit ASR text via {@code p0(false,"")} and dispatch
+     * Newline-fast path: commit ASR text via Doubao's stop-ASR API and dispatch
      * a {@code KEYCODE_ENTER} key event once Doubao's ASR pipeline has
      * actually finished finalizing.
      *
@@ -789,12 +783,7 @@ public final class DoubaoLetterLongPressHook {
         subscribeAsrAllBackThen(cl, NEWLINE_ASR_MAX_WAIT_MS, () -> sendEnterKey(cl));
         Object mgr = ensureAsrManager(cl);
         if (mgr != null) {
-            try {
-                XposedHelpers.callMethod(mgr, "p0", false, "");
-                log("p0(false,\"\") fired (newline path)");
-            } catch (Throwable e) {
-                log("ERR p0(): " + e.getClass().getSimpleName());
-            }
+            callAsrStop(mgr, false, "", "newline path");
         }
     }
 
@@ -891,30 +880,20 @@ public final class DoubaoLetterLongPressHook {
 
     /**
      * Letter zone release = ordinary commit, mirrors space long-press "lift
-     * anywhere not on a slide button". Calls {@code InputView.R(false)} +
-     * {@code AsrManager.q0()} (graceful stop with 150ms delay to {@code p0}).
+     * anywhere not on a slide button". Calls {@code InputView.R(false)} plus
+     * Doubao's graceful long-press stop API.
      */
     private static void commitVoice(final ClassLoader cl) {
         cancelPendingCommit();
         Object inputView = getInputView(cl);
-        callInputViewR(inputView, false);
+        callInputViewCloseAsrUi(inputView, false);
 
         Object mgr = ensureAsrManager(cl);
         if (mgr == null) {
-            log("skip q0(): AsrManager not resolvable");
+            log("skip graceful commit: AsrManager not resolvable");
             return;
         }
-        try {
-            XposedHelpers.callMethod(mgr, "q0");
-            log("AsrManager.q0() fired (commit, graceful)");
-        } catch (Throwable e) {
-            log("ERR q0(): " + e.getClass().getSimpleName()
-                    + " -> fallback p0(false,\"\")");
-            try {
-                XposedHelpers.callMethod(mgr, "p0", false, "");
-            } catch (Throwable ignore) {
-            }
-        }
+        callAsrGracefulCommit(mgr);
     }
 
     private static void cancelVoice(ClassLoader cl) {
@@ -927,11 +906,7 @@ public final class DoubaoLetterLongPressHook {
         }
         Object mgr = ensureAsrManager(cl);
         if (mgr != null) {
-            try {
-                XposedHelpers.callMethod(mgr, "p0", true, ASR_CANCEL_REASON);
-            } catch (Throwable t) {
-                log("ERR AsrManager.p0: " + t.getClass().getSimpleName());
-            }
+            callAsrStop(mgr, true, ASR_CANCEL_REASON, "cancel");
         }
         // Diagnostic probe: log whether L.a all-back fires on cancel (does NOT change behavior).
         subscribeAsrAllBackThen(cl, 2000L, null);
@@ -1087,6 +1062,53 @@ public final class DoubaoLetterLongPressHook {
             log("ERR ensureAsrManager: " + Log.getStackTraceString(t));
         }
         return sAsrManager;
+    }
+
+    private static boolean callAsrStop(Object mgr, boolean noWaitResult, String from,
+                                       String logContext) {
+        try {
+            XposedHelpers.callMethod(mgr, "s0",
+                    new Class<?>[]{boolean.class, String.class},
+                    noWaitResult, from);
+            log("AsrManager.s0(" + noWaitResult + ",\"" + from + "\") fired ("
+                    + logContext + ")");
+            return true;
+        } catch (Throwable t) {
+            log("ERR AsrManager.s0(" + logContext + "): "
+                    + t.getClass().getSimpleName());
+        }
+        try {
+            XposedHelpers.callMethod(mgr, "p0",
+                    new Class<?>[]{boolean.class, String.class},
+                    noWaitResult, from);
+            log("AsrManager.p0(" + noWaitResult + ",\"" + from + "\") fired ("
+                    + logContext + ")");
+            return true;
+        } catch (Throwable t) {
+            log("ERR AsrManager.p0(" + logContext + "): "
+                    + t.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    private static void callAsrGracefulCommit(Object mgr) {
+        try {
+            XposedHelpers.callMethod(mgr, "t0");
+            log("AsrManager.t0() fired (commit, graceful)");
+            return;
+        } catch (Throwable t) {
+            log("ERR AsrManager.t0(): " + t.getClass().getSimpleName()
+                    + " -> fallback q0()");
+        }
+        try {
+            XposedHelpers.callMethod(mgr, "q0");
+            log("AsrManager.q0() fired (commit, graceful)");
+            return;
+        } catch (Throwable t) {
+            log("ERR AsrManager.q0(): " + t.getClass().getSimpleName()
+                    + " -> fallback stop(false,\"\")");
+        }
+        callAsrStop(mgr, false, "", "commit fallback");
     }
 
     private static Object ensureAsrProcess(ClassLoader cl) {
@@ -1389,17 +1411,10 @@ public final class DoubaoLetterLongPressHook {
             return false;
         }
         // Primary top exclusion: Doubao's native getToolbarHeight() in pixels.
-        // Translation mode raises the toolbar; this value grows accordingly.
-        if (toolbarHeight > 0 && y < toolbarHeight) {
+        // When it reports 0, fall back to the measured ASR action-row ratio.
+        int topExclusion = effectiveToolbarHeight(w, h, toolbarHeight);
+        if (y < topExclusion) {
             return false;
-        }
-        // Fallback ratio when native call failed (toolbarHeight <= 0).
-        if (toolbarHeight <= 0) {
-            boolean tallToolbar = (h > w * TALL_KBD_H_OVER_W);
-            float topRatio = tallToolbar ? LETTER_TOP_TALL : LETTER_TOP_NORMAL;
-            if (y < h * topRatio) {
-                return false;
-            }
         }
         // Bottom row (space + function keys).
         if (y >= h * LETTER_BOTTOM) {
@@ -1426,11 +1441,23 @@ public final class DoubaoLetterLongPressHook {
 
     // ===== Zone tracking + slide-to-action =====
 
+    private static int effectiveToolbarHeight(int w, int h, int toolbarHeight) {
+        if (toolbarHeight > 0) {
+            return toolbarHeight;
+        }
+        if (w <= 0 || h <= 0) {
+            return 0;
+        }
+        boolean tallToolbar = (h > w * TALL_KBD_H_OVER_W);
+        float topRatio = tallToolbar ? TOOLBAR_TOP_TALL : TOOLBAR_TOP_NORMAL;
+        return Math.max(1, Math.round(h * topRatio));
+    }
+
     private static Zone computeZone(float x, float y, int w, int h, int toolbarHeight) {
         if (x < 0f || y < 0f || x >= w || y >= h) {
             return Zone.OUTSIDE;
         }
-        if (toolbarHeight > 0 && y < toolbarHeight) {
+        if (y < effectiveToolbarHeight(w, h, toolbarHeight)) {
             return Zone.TOOLBAR;
         }
         return Zone.LETTER;
@@ -1456,7 +1483,7 @@ public final class DoubaoLetterLongPressHook {
         sCurrentZone = next;
         sLastZoneChangeTs = now;
         // Make sure overlay exists (may be detached after lifecycle reset).
-        ensureOverlay(cl, tbH);
+        ensureOverlay(cl, effectiveToolbarHeight(w, h, tbH));
         int enterOrdinal = (sRecordingEnterOrdinal >= 0) ? sRecordingEnterOrdinal : resolveEffectiveEnterOrdinal(cl);
         updateOverlayForZone(next, enterOrdinal, cl);
         if (next == Zone.TOOLBAR || next == Zone.OUTSIDE) {
@@ -1481,15 +1508,23 @@ public final class DoubaoLetterLongPressHook {
         }
     }
 
-    /** Calls {@code InputView.R(boolean)} — tidies up ASR UI before sending. */
-    private static void callInputViewR(Object inputView, boolean z) {
+    /** Tidies up Doubao's ASR long-press UI before sending or committing. */
+    private static void callInputViewCloseAsrUi(Object inputView, boolean z) {
         if (inputView == null) {
             return;
         }
         try {
-            XposedHelpers.callMethod(inputView, "R", z);
+            XposedHelpers.callMethod(inputView, "T", z);
+            log("InputView.T(" + z + ") fired (close ASR UI)");
+            return;
         } catch (Throwable t) {
-            log("ERR InputView.R(): " + t.getClass().getSimpleName());
+            log("ERR InputView.T(): " + t.getClass().getSimpleName());
+        }
+        try {
+            XposedHelpers.callMethod(inputView, "R", z);
+            log("InputView.R(" + z + ") fired (close ASR UI)");
+        } catch (Throwable t) {
+            log("ERR InputView.R(boolean): " + t.getClass().getSimpleName());
         }
     }
 
