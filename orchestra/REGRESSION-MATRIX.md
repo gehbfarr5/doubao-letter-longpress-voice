@@ -44,8 +44,8 @@ rg -n "org.telegram|baidu.ernie|google.android.apps.bard|ai.x.grok|moonshot" app
 | TOOLBAR zone 徽章（蓝色，动作标签） | ✅ PASS | v1.6.3 修复后尺寸正确（~120px），不再糊字母键 |
 | OUTSIDE/取消 zone 徽章（红色撤回输入） | ✅ PASS | 同上 |
 | Claude 发送（AccessibilityService） | ✅ PASS | 端到端验证：文字上屏→自动点发送→Claude 真实回复收到 |
-| ChatGPT 发送 | ⛔ 未测 | 账号卡在登录/OTP 验证页，是已知的 Play Integrity 问题（见 Codex skill oneplus-app-projects.md），与本模块无关，这轮测不了 |
-| Nekogram 发送/搜索 | ⏸️ 推迟 | 自动化操作被 harness 的安全分类器拦截（在真实 IM app 里连续 tap+发送 被判定为"真实消息发送"风险，即便目标是自聊"我的收藏"也一样），推迟给用户自己手动确认 |
+| ChatGPT 发送 | ✅ PASS（用户手动确认） | 自动化这轮卡在登录/OTP 页测不了；用户自己登录后手动验证过，发送正常 |
+| Nekogram 发送/搜索 | ✅ PASS（用户手动确认） | 自动化被安全分类器拦截（真实 IM app 里连续 tap+发送 被判定为风险操作）；用户自己手动验证过，发送/搜索都正常 |
 | 长按 Shift 不触发（负测试） | ✅ PASS | 长按 Shift 键，无语音触发迹象，原生高亮行为保留 |
 | 长按 Backspace 不触发（负测试） | ⛔ 未测 | 时间关系没测完，风险较低（跟 Shift 同一段边缘几何排除逻辑）|
 | 数字输入框跳过 | ⛔ 未测 | 未覆盖 |
@@ -53,4 +53,4 @@ rg -n "org.telegram|baidu.ernie|google.android.apps.bard|ai.x.grok|moonshot" app
 | 取消不上屏 | 🟡 间接验证 | OUTSIDE zone 手势后目标输入框始终为空，没有观察到误上屏；但没有专门做"先有内容再取消"的对照测试 |
 | ASR 转写内容准确性 | ❌ 无法测 | 需要真人说话，adb 合成触摸手势无法提供音频输入，这是自动化测试的硬限制，不是本模块的问题 |
 
-结论：核心链路（触发→zone 判定→徽章渲染→跨应用发送）在真机上端到端跑通且证据扎实（Claude 场景收到了真实 AI 回复，不是猜的）。未覆盖项主要卡在：(a) 需要真人语音输入，(b) ChatGPT 账号登录问题（另案），(c) IM 类 app 里的自动化被安全机制正当拦截，需要用户自己补测。
+结论：核心链路（触发→zone 判定→徽章渲染→跨应用发送）在真机上端到端跑通且证据扎实（Claude 场景收到了真实 AI 回复，不是猜的；ChatGPT/Nekogram 由用户手动补测确认通过）。剩余未覆盖项（Backspace 负测试、数字输入框跳过、长文本不重复上屏）风险较低，ASR 转写内容准确性本质上测不了（需要真人语音输入，不是本模块问题）。
