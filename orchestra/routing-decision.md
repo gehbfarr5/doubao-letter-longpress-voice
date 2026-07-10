@@ -1,17 +1,17 @@
-# Routing Decision — v1.6.2 getInputView 字段改名修复
+# Routing Decision — v1.6.3 徽章尺寸修复
 
 | 项 | 内容 |
 |---|---|
 | 日期 | 2026-07-10 |
-| 需求 | 修复 `getInputView()` 对豆包 1.3.14 `ImeService.x→y` 字段改名的兼容 |
+| 需求 | 修复 zone 反馈徽章尺寸偏大（比例兜底 283px vs 真实 201px） |
 | 类型 | 代码改动 → 完整流程 |
 | 档位 | 默认（`gpt-5.4`）|
-| **判档理由** | 单方法级修复，改动范围已在规划阶段通过反编译精确定位（`getInputView()` 一个方法），有现成同款模式（`extractKeyboardView()`）可抄，非架构/核心改动，无需质量档 |
-| **研究外包** | **不派**。根因已在 Planner 阶段用 `apktool d` 反编译设备上的真实豆包 1.3.14 `base.apk` 验证完成（不是猜测），修复代码已经在 HANDOFF 里写好，Executor 照抄落地即可，没有需要外部检索的未知点 |
+| **判档理由** | 改动范围明确（`effectiveToolbarHeight` + 两个级联签名改动，共 4 个调用点），根因和实现代码都已在规划阶段用完整反编译+真机诊断 build 验证过，不是架构级改动，无需质量档 |
+| **研究外包** | **不派**。根因链已在 Planner 阶段查清：`apktool d`（完整，不加 `-r`）反编译真实设备 1.3.14 APK 找到 `native_candidate_bar` 布局定义，再用临时诊断 build（`DEBUG=true` + `findViewById` 打点）在真机上验证了实际测量值（201px vs 兜底算出的 283px）。修复代码已在 HANDOFF 写好，Executor 照抄落地 |
 | Executor model | `codex -m gpt-5.4` |
-| Verifier | 独立子 Agent，Sonnet，lint + build + grep 取证；**无法做真机烟测**（LSPosed 环境本身故障，另案，不阻塞本次修复落地） |
-| Task file | `orchestra/task-current.md` + `orchestra/HANDOFF-v1.3.14-inputview-field-rename.md` |
-| 项目目录 | `/Users/jin/Desktop/doubao-letter-longpress-voice`（注：`~/Documents/oss/...` 是旧记录，已在 Codex skill 里更正） |
+| Verifier | 独立子 Agent，Sonnet，lint + build + grep 取证；**这轮 orchestrator 会自己补真机验证**（LSPosed 环境上一轮已确认是好的，不存在阻塞） |
+| Task file | `orchestra/task-current.md` + `orchestra/HANDOFF-v1.6.3-badge-size.md` |
+| 项目目录 | `/Users/jin/Desktop/doubao-letter-longpress-voice` |
 | Sandbox | `-s workspace-write -C <项目>`（强制）|
 | 撞车检测 | 单任务串行，无撞车风险 |
 | Repair 预算 | 最多 2 轮 |
@@ -22,5 +22,5 @@
 |---|---|
 | `EXEC_QUOTA` | 兜底 Reasonix（patch 法）|
 | `EXEC_AUTH` | 停，提示用户重登 Codex |
-| Verifier 只能机检，无真机烟测证据 | PASS 判定标「机检通过 + 代码审查，实机验证待补」，不算完全置信但可以先落库 |
-| 构建环境（JDK/Gradle）不可用 | 记录具体报错，回 Planner 评估是否降级为纯代码审查验收 |
+| 级联签名改动漏改某个调用点导致编译失败 | HANDOFF 已列出全部 4 个调用点行号，Verifier 用 `./gradlew assembleDebug` 能直接抓到编译错误，走 repair 循环 |
+| 真机验证徽章仍然偏大（可能 `native_candidate_bar` 在有真实翻译/AI工具栏的场景下高度不同） | 记录实测数据，评估是否需要额外场景验证，不算这轮任务失败（这轮目标是把兜底从纯猜测换成有真实信号支撑的实时测量，不是保证所有场景像素级精确）|
