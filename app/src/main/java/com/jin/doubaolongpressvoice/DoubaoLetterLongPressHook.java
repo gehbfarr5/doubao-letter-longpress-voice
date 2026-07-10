@@ -186,6 +186,7 @@ public final class DoubaoLetterLongPressHook {
     private static final int OVERLAY_MARGIN_FALLBACK_DP = 8;
     private static final String DIMEN_NAME_OVERLAY_MARGIN =
             "asr_editor_candidate_container_padding_horizontal";
+    private static final String RES_ID_NATIVE_CANDIDATE_BAR = "native_candidate_bar";
     private static final float OVERLAY_CORNER_RADIUS_DP = 8f;  // candidate-box style
     private static final float OVERLAY_ELEVATION_DP = 3f;
     // Brand-aligned colors (opaque). Matches what Doubao uses for press states
@@ -258,7 +259,8 @@ public final class DoubaoLetterLongPressHook {
     private static final float ONE_HAND_WIDTH_RATIO = 0.85f;
     // Top exclusion = toolbar / candidates bar / ASR slide-action row.
     // Doubao 1.3.14 can report getToolbarHeight() as 0 while still rendering a
-    // sizeable top action row. Fall back to ratios measured against KeyboardView.
+    // sizeable top action row. Prefer the live native_candidate_bar height and
+    // keep these ratios only as the last-resort fallback.
     private static final float TOOLBAR_TOP_NORMAL = 0.30f;
     private static final float TOOLBAR_TOP_TALL = 0.34f;
     private static final float TALL_KBD_H_OVER_W = 0.85f;
@@ -369,7 +371,7 @@ public final class DoubaoLetterLongPressHook {
                                     log("gate=mode_blocked (floating/oneHand) skip");
                                     return;
                                 }
-                                if (!isLetterZone(x, y, w, h, kbdType, toolbarHeight)) {
+                                if (!isLetterZone(cl, x, y, w, h, kbdType, toolbarHeight)) {
                                     log("gate=geom_outside x=" + x + " y=" + y
                                             + " w=" + w + " h=" + h + " kbdType=" + kbdType
                                             + " toolbarH=" + toolbarHeight);
@@ -399,7 +401,7 @@ public final class DoubaoLetterLongPressHook {
                                 triggerVoiceStart(cl);
                                 sendCancelToNative(kvView, x, y);
                                 performSpeechStartFeedback();
-                                ensureOverlay(cl, effectiveToolbarHeight(w, h, toolbarHeight));
+                                ensureOverlay(cl, effectiveToolbarHeight(cl, w, h, toolbarHeight));
                                 scheduleAsrStartVerification(cl);
                             } catch (Throwable t) {
                                 log("ERR handleMessage hook: " + Log.getStackTraceString(t));
@@ -476,7 +478,7 @@ public final class DoubaoLetterLongPressHook {
                                     vh = vv.getHeight();
                                     int tbH = (sCachedToolbarHeight > 0)
                                             ? sCachedToolbarHeight : readToolbarHeight(cl);
-                                    releaseZone = computeZone(ux, uy, vw, vh, tbH);
+                                    releaseZone = computeZone(cl, ux, uy, vw, vh, tbH);
                                 } else {
                                     releaseZone = sCurrentZone;
                                 }
@@ -1406,14 +1408,14 @@ public final class DoubaoLetterLongPressHook {
         }
     }
 
-    private static boolean isLetterZone(int x, int y, int w, int h, int kbdType,
+    private static boolean isLetterZone(ClassLoader cl, int x, int y, int w, int h, int kbdType,
                                         int toolbarHeight) {
         if (w <= 0 || h <= 0) {
             return false;
         }
-        // Primary top exclusion: Doubao's native getToolbarHeight() in pixels.
-        // When it reports 0, fall back to the measured ASR action-row ratio.
-        int topExclusion = effectiveToolbarHeight(w, h, toolbarHeight);
+        // Primary top exclusion: native getToolbarHeight(); when that is 0,
+        // prefer live native_candidate_bar height and keep ratio as last resort.
+        int topExclusion = effectiveToolbarHeight(cl, w, h, toolbarHeight);
         if (y < topExclusion) {
             return false;
         }
@@ -1442,9 +1444,32 @@ public final class DoubaoLetterLongPressHook {
 
     // ===== Zone tracking + slide-to-action =====
 
-    private static int effectiveToolbarHeight(int w, int h, int toolbarHeight) {
+    private static int readNativeCandidateBarHeight(ClassLoader cl) {
+        try {
+            Object inputView = getInputView(cl);
+            if (!(inputView instanceof ViewGroup)) {
+                return -1;
+            }
+            ViewGroup vg = (ViewGroup) inputView;
+            int id = vg.getResources().getIdentifier(
+                    RES_ID_NATIVE_CANDIDATE_BAR, "id", DOUBAO_PACKAGE);
+            if (id == 0) {
+                return -1;
+            }
+            View bar = vg.findViewById(id);
+            return (bar != null && bar.getHeight() > 0) ? bar.getHeight() : -1;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    private static int effectiveToolbarHeight(ClassLoader cl, int w, int h, int toolbarHeight) {
         if (toolbarHeight > 0) {
             return toolbarHeight;
+        }
+        int live = readNativeCandidateBarHeight(cl);
+        if (live > 0) {
+            return live;
         }
         if (w <= 0 || h <= 0) {
             return 0;
@@ -1454,11 +1479,12 @@ public final class DoubaoLetterLongPressHook {
         return Math.max(1, Math.round(h * topRatio));
     }
 
-    private static Zone computeZone(float x, float y, int w, int h, int toolbarHeight) {
+    private static Zone computeZone(ClassLoader cl, float x, float y, int w, int h,
+                                    int toolbarHeight) {
         if (x < 0f || y < 0f || x >= w || y >= h) {
             return Zone.OUTSIDE;
         }
-        if (y < effectiveToolbarHeight(w, h, toolbarHeight)) {
+        if (y < effectiveToolbarHeight(cl, w, h, toolbarHeight)) {
             return Zone.TOOLBAR;
         }
         return Zone.LETTER;
@@ -1472,7 +1498,7 @@ public final class DoubaoLetterLongPressHook {
     private static void maybeUpdateZone(ClassLoader cl, View kvView, float x, float y,
                                         int w, int h) {
         int tbH = (sCachedToolbarHeight > 0) ? sCachedToolbarHeight : readToolbarHeight(cl);
-        Zone next = computeZone(x, y, w, h, tbH);
+        Zone next = computeZone(cl, x, y, w, h, tbH);
         if (next == sCurrentZone) {
             return;
         }
@@ -1484,7 +1510,7 @@ public final class DoubaoLetterLongPressHook {
         sCurrentZone = next;
         sLastZoneChangeTs = now;
         // Make sure overlay exists (may be detached after lifecycle reset).
-        ensureOverlay(cl, effectiveToolbarHeight(w, h, tbH));
+        ensureOverlay(cl, effectiveToolbarHeight(cl, w, h, tbH));
         int enterOrdinal = (sRecordingEnterOrdinal >= 0) ? sRecordingEnterOrdinal : resolveEffectiveEnterOrdinal(cl);
         updateOverlayForZone(next, enterOrdinal, cl);
         if (next == Zone.TOOLBAR || next == Zone.OUTSIDE) {

@@ -40,7 +40,7 @@
 
 | 项 | 实测环境 | 备注 |
 |---|---|---|
-| 豆包输入法 | **v1.3.11 / v1.3.14** (`com.bytedance.android.doubaoime`) | v1.3.14 已适配 `AsrManager.s0/t0` 重命名、`getToolbarHeight()==0` 的顶部工具栏判定，以及 `ImeService.InputView` 静态字段 `x→y` 改名；其它版本仍可能因混淆字段重命名失效，失败只影响该功能，不应导致输入法崩溃 |
+| 豆包输入法 | **v1.3.11 / v1.3.14** (`com.bytedance.android.doubaoime`) | v1.3.14 已适配 `AsrManager.s0/t0` 重命名、`getToolbarHeight()==0` 时改读真实 `native_candidate_bar` 高度修正徽章尺寸，以及 `ImeService.InputView` 静态字段 `x→y` 改名；其它版本仍可能因混淆字段重命名失效，失败只影响该功能，不应导致输入法崩溃 |
 | Android | 6.0+ (API 23+) | 取决于 LSPosed 支持范围 |
 | LSPosed | 任意版本，xposedminversion=82 | |
 | 物理键盘布局 | **26 键 QWERTY**（拼音 / 自然码 / 双拼 / 英文）+ **9 宫格拼音** | 手写键盘走 `HandWritingBoardView`，**自动跳过** |
