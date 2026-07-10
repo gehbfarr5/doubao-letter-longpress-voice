@@ -119,3 +119,19 @@ shows exactly one hunk: the new `import java.lang.reflect.Modifier;` line and th
 6/6 machine-checkable criteria PASS with real command output (not assumed). Code review confirms the fix is the intended self-healing fast-path + type-scan pattern, not the fragile string-swap anti-pattern the task explicitly warned against. Diff is scoped exactly to the declared files with no incursion into declared-off-limits code. The only gap is real-device confirmation, which was known-blocked before this round started and is explicitly deferred, not silently skipped.
 
 **Safe to commit.** Real-device badge-appears verification remains outstanding and should happen once the LSPosed/zygisk environment is restored.
+
+---
+
+## Addendum (2026-07-10, later same day): real-device verification completed
+
+The "LSPosed/zygisk daemon does not hook on this device" premise behind §7's
+deferral was wrong — a misdiagnosis from checking the wrong evidence
+(`ps`/`proc-maps` instead of `lsof .cli_sock` / the lspd verbose log; see the
+correction in the OnePlus 15 Codex skill's `oneplus-app-projects.md`).
+LSPosed/Vector-SR was working the whole time. v1.6.2 was installed on-device,
+`com.bytedance.android.doubaoime` force-stopped to pick up the fresh hook, and
+a real long-press-and-slide gesture was driven via `adb shell input
+touchscreen motionevent`: sliding into the toolbar zone showed the blue
+"换行" badge, sliding out showed the red "撤回输入" cancel badge — both
+correctly attached and rendered. **Real-device confirmation: PASS.** No
+outstanding verification gap remains for this fix.
