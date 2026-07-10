@@ -144,3 +144,9 @@ Not performed by this Verifier — per task-current.md §"真机验证", this st
 5/5 machine-checkable criteria PASS with real command output re-run from a clean, fresh-context session (not trusted from Executor's self-report). Code review confirms the three-tier fallback order is correct and complete (native API → live `native_candidate_bar` measurement → ratio heuristic, nothing deleted or reordered), the cascading `ClassLoader cl` signature change is threaded through all 10 definition/call sites with no gaps (mechanically guaranteed by a clean compile, and manually spot-checked for correct-variable threading), the new function is exception-safe (single `try/catch (Throwable)` wrapping the entire body) and deliberately uncached per spec, and all declared off-limits code (`getInputView()` body, `AsrManager`, `KeyboardJni`) is untouched.
 
 **Safe to commit.** Real-device badge-size confirmation (~201px target) remains outstanding and is the orchestrator's next step per the task's own division of labor, not a blocker discovered by this verify pass.
+
+---
+
+## Addendum (orchestrator, same day): real-device confirmed
+
+v1.6.3 installed on-device, `com.bytedance.android.doubaoime` force-stopped, badge re-tested with the same long-press-and-slide gesture used in prior rounds. Pixel-measured the rendered badge color band from screenshots: TOOLBAR zone badge now measures **~120px** tall (down from v1.6.2's ~206px), matching the expected `stripHeight = max(toolbarHeight - 2*margin, toolbarHeight/2) = max(201-84, 100) = 117px` computation almost exactly. OUTSIDE/cancel zone badge shows the same shrink. Visually, both badges now sit cleanly within the candidate-bar row instead of bleeding into the first letter-key row. **Real-device confirmation: PASS.**
