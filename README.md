@@ -40,7 +40,7 @@
 
 | 项 | 实测环境 | 备注 |
 |---|---|---|
-| 豆包输入法 | **v1.3.11 / v1.3.14** (`com.bytedance.android.doubaoime`) | v1.3.14 已适配 `AsrManager.s0/t0` 重命名和 `getToolbarHeight()==0` 的顶部工具栏判定；其它版本仍可能因混淆字段重命名失效，失败只影响该功能，不应导致输入法崩溃 |
+| 豆包输入法 | **v1.3.11 / v1.3.14** (`com.bytedance.android.doubaoime`) | v1.3.14 已适配 `AsrManager.s0/t0` 重命名、`getToolbarHeight()==0` 的顶部工具栏判定，以及 `ImeService.InputView` 静态字段 `x→y` 改名；其它版本仍可能因混淆字段重命名失效，失败只影响该功能，不应导致输入法崩溃 |
 | Android | 6.0+ (API 23+) | 取决于 LSPosed 支持范围 |
 | LSPosed | 任意版本，xposedminversion=82 | |
 | 物理键盘布局 | **26 键 QWERTY**（拼音 / 自然码 / 双拼 / 英文）+ **9 宫格拼音** | 手写键盘走 `HandWritingBoardView`，**自动跳过** |
@@ -129,7 +129,7 @@ Hook `ImeService.onFinishInput()` 和 `onFinishInputView(boolean)` 清掉所有 
 ## 📊 已知限制
 
 - 仅适配 **26 键 QWERTY + 9 宫格 Pinyin**。手写键盘自动跳过；浮动/单手模式自动跳过；横屏未主动适配（豆包横屏默认走浮动）。
-- 仅对豆包 **v1.3.11 / v1.3.14** 实测过。其它版本可能因混淆字段重命名失效（不会崩，只会该功能不工作）。
+- 仅对豆包 **v1.3.11 / v1.3.14** 实测过；v1.3.14 已补 `ImeService.InputView` 静态字段 `x→y` 改名兼容。其它版本仍可能因混淆字段重命名失效（不会崩，只会该功能不工作）。
 - 横向滑出 cancel 失效：豆包 KeyboardView 在常规设备上横向铺满全屏，系统会把 x 钳到边界。**仅支持向上 / 向下滑出 cancel**。
 - "整理"效果依赖豆包 ASR 引擎自身能力（标点、同音字纠正等），不是 LLM 级别的语义改写。LLM 候选窗 (`LLMCandidate.updateCandidateList`) 不在本模块范围内。
 - 跨应用发送（a11y）目前只支持并实测 **Claude / ChatGPT**。选择器含排除词过滤 + 优先级排序，但应用大改版后节点结构可能变化（服务找不到时会把当前界面候选节点 dump 到 logcat：`adb logcat -s DoubaoVoiceSend`）。需手动授权无障碍服务。

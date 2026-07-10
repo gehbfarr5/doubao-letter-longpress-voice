@@ -29,6 +29,7 @@ import android.widget.TextView;
 
 import java.lang.ref.SoftReference;
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -1496,16 +1497,30 @@ public final class DoubaoLetterLongPressHook {
     }
 
     /**
-     * Reads {@code ImeService.x} — the {@code InputView} singleton (a
-     * FrameLayout that hosts toolbar + candidates + keyboard).
+     * Reads the {@code InputView} singleton (a FrameLayout that hosts toolbar
+     * + candidates + keyboard) from {@code ImeService}.
      */
     private static Object getInputView(ClassLoader cl) {
         try {
             Class<?> imeServiceCls = XposedHelpers.findClass(IME_SERVICE, cl);
-            return XposedHelpers.getStaticObjectField(imeServiceCls, "x");
+            try {
+                return XposedHelpers.getStaticObjectField(imeServiceCls, "y");
+            } catch (Throwable ignore) {
+            }
+            for (Field f : imeServiceCls.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers())
+                        && FrameLayout.class.isAssignableFrom(f.getType())) {
+                    f.setAccessible(true);
+                    Object v = f.get(null);
+                    if (v != null) {
+                        return v;
+                    }
+                }
+            }
         } catch (Throwable t) {
-            return null;
+            log("ERR getInputView: " + t.getClass().getSimpleName());
         }
+        return null;
     }
 
     /** Tidies up Doubao's ASR long-press UI before sending or committing. */
