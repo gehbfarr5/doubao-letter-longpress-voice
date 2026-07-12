@@ -12,6 +12,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
@@ -26,6 +27,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.lang.ref.SoftReference;
 import java.lang.reflect.Field;
@@ -119,6 +121,10 @@ public final class DoubaoLetterLongPressHook {
     private static final String EDITOR_VIEW_INFO =
             "com.bytedance.android.input.speech.view.o";
     private static final String DOUBAO_PACKAGE = "com.bytedance.android.doubaoime";
+    private static final String A11Y_SERVICE_COMPONENT =
+            "com.jin.doubaolongpressvoice/.DoubaoVoiceSendA11yService";
+    private static final String A11Y_SEND_WARNING_TEXT =
+            "豆包语音发送：无障碍服务未启用，发送可能失败";
 
     private static final int MSG_LONGPRESS = 1;
     private static final int DO_FUNCTION_KEY_VOICE_START = 6;
@@ -736,6 +742,29 @@ public final class DoubaoLetterLongPressHook {
      * target app's visible send button.
      */
     private static void dispatchViaA11ySend(final ClassLoader cl, final String pkg) {
+        try {
+            final android.content.Context ctx = getImeContext(cl);
+            if (ctx != null) {
+                String enabledServices = Settings.Secure.getString(
+                        ctx.getContentResolver(), "enabled_accessibility_services");
+                if (enabledServices == null || !enabledServices.contains(A11Y_SERVICE_COMPONENT)) {
+                    log("a11y send warning: service missing in secure settings pkg=" + pkg
+                            + " enabled_accessibility_services=" + enabledServices);
+                    sMainHandler.post(() -> {
+                        try {
+                            Toast.makeText(ctx, A11Y_SEND_WARNING_TEXT, Toast.LENGTH_SHORT).show();
+                        } catch (Throwable toastErr) {
+                            log("ERR a11y send warning toast: "
+                                    + Log.getStackTraceString(toastErr));
+                        }
+                    });
+                }
+            } else {
+                log("skip a11y send settings check: mImeService not Context");
+            }
+        } catch (Throwable t) {
+            log("ERR read enabled_accessibility_services: " + Log.getStackTraceString(t));
+        }
         // Register listener BEFORE p0() to avoid missing the all-back callback.
         subscribeAsrAllBackThen(cl, NEWLINE_ASR_MAX_WAIT_MS, () -> broadcastA11ySend(cl, pkg));
         Object mgr = ensureAsrManager(cl);
@@ -847,13 +876,11 @@ public final class DoubaoLetterLongPressHook {
     /** Broadcasts a request to our AccessibilityService to click the send button. */
     private static void broadcastA11ySend(ClassLoader cl, String pkg) {
         try {
-            Class<?> jniCls = XposedHelpers.findClass(KEYBOARD_JNI, cl);
-            Object ime = XposedHelpers.getStaticObjectField(jniCls, "mImeService");
-            if (!(ime instanceof android.content.Context)) {
+            android.content.Context ctx = getImeContext(cl);
+            if (ctx == null) {
                 log("skip broadcastA11ySend: mImeService not Context");
                 return;
             }
-            android.content.Context ctx = (android.content.Context) ime;
             android.content.Intent intent = new android.content.Intent(
                     DoubaoVoiceSendA11yService.ACTION_A11Y_SEND)
                     .setPackage("com.jin.doubaolongpressvoice")
@@ -863,6 +890,15 @@ public final class DoubaoLetterLongPressHook {
         } catch (Throwable t) {
             log("ERR broadcastA11ySend: " + Log.getStackTraceString(t));
         }
+    }
+
+    private static android.content.Context getImeContext(ClassLoader cl) {
+        Class<?> jniCls = XposedHelpers.findClass(KEYBOARD_JNI, cl);
+        Object ime = XposedHelpers.getStaticObjectField(jniCls, "mImeService");
+        if (ime instanceof android.content.Context) {
+            return (android.content.Context) ime;
+        }
+        return null;
     }
 
     /** Sends KEYCODE_ENTER (66) via {@code InputMethodService.sendDownUpKeyEvents}. */
