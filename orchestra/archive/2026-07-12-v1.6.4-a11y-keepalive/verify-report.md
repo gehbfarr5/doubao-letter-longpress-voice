@@ -235,3 +235,19 @@ a11y 服务进程在跑、无测试残留、模块已 staged 于 `modules_update
 （下次重启激活，间隔 120s）。
 
 **总判定：PASS**（静态 + 真机双证）
+
+---
+
+## 追加：真机重启端到端复测（orchestrator，2026-07-12 16:38-16:45）
+
+装 v1.6.4 APK（versionCode 12）+ 保活模块后，做了完整重启复现故障场景：
+
+- **开机自启**：模块 daemon 随开机启动（`/data/adb/modules/doubaovoicesend_keepalive/service.sh`，PID 随 boot）。
+- **复现 ColorOS 清授权**：重启后（RUNNING_LOCKED）ColorOS 把 `accessibility_enabled` 重置为 0；模块开机后 ~1s 自动补回（log `repair applied: accessibility_enabled=1` @16:38:07）。解锁后 ColorOS **再清一次**（`enabled_accessibility_services` 整个清空）；模块下一轮补回全名（log @16:40:07）。
+- **关键真机发现**：ColorOS 的清除集中在**开机/解锁后的不稳定窗口（约头 2-3 分钟）**，期间可能秒级反复清除；系统 settle 后写入即稳定（手动/模块写入后 40s+ 不再被清）。这解释了原始时间线（07-10 装、稳用到 07-11，仅 07-12 重启窗口被清）。
+- **据此收紧**：`INTERVAL` 120→30s，缩短重启后授权空档（成本可忽略，settle 后无写入/无日志）。新模块已 staged，下次重启生效。
+- **最终验证**：a11y 服务已 **Bound**（`Service[label=豆包语音发送助手...]`），`enabled_accessibility_services`=单条全名、`accessibility_enabled=1`、40s 稳定无重复、APK=1.6.4。
+
+**无法自动化的部分（诚实声明）**：完整「长按字母→语音 ASR→滑工具栏→a11y 点发送」手势需真实麦克风语音输入，ADB/AndroMeld 无法注入；该 a11y 点击链路在 v1.6.4 未改动，07-11 用户已实测通过。本次验证覆盖了 v1.6.4 的全部改动点（保活自愈、开机自启、规范化匹配、服务绑定），未做真人发送。
+
+**端到端结论：PASS**（重启→自愈→服务绑定，真机闭环）

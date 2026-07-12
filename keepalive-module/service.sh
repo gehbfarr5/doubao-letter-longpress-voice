@@ -2,7 +2,9 @@
 
 COMP_FULL="com.jin.doubaolongpressvoice/com.jin.doubaolongpressvoice.DoubaoVoiceSendA11yService"
 COMP_SHORT="com.jin.doubaolongpressvoice/.DoubaoVoiceSendA11yService"
-INTERVAL=120
+# ColorOS re-strips the service repeatedly during the volatile window right
+# after boot/unlock, so keep the interval short to close that gap quickly.
+INTERVAL=30
 LOG="/data/local/tmp/doubaovoicesend_keepalive.log"
 LOG_LIMIT=65536
 
