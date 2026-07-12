@@ -196,3 +196,42 @@ BUILD SUCCESSFUL in 6s
 **总判定：PASS**
 
 无发现任何 FAIL 项。构建产物、脚本语法、组件命名、版本号、日志截断、幂等追加、异常兜底、主线程 Toast 等关键行为均以实际命令输出/源码文本核实，未依赖任何先前执行器的自报结论。
+
+---
+
+## 追加：v1.6.4-r1 repair 真机复验（orchestrator，2026-07-12）
+
+### 起因
+真机安装后发现组件名规范化 bug（详见 `repair-task.md`）：Android 把无障碍
+组件存成全限定名 `pkg/pkg.Class`，而模块/hook 用短名 `pkg/.Class` 做 contains
+判断，全名不含短名子串 → 模块每轮误追加重复项、hook 服务正常时也每次误弹 Toast。
+静态验收查不出，属真机行为暴露。已回 Executor 修复（1 轮）。
+
+### repair 静态验收（全 PASS）
+- `sh -n keepalive-module/service.sh` → rc=0
+- `grep -c 'COMP_FULL=' service.sh` → 1
+- 全名串在 service.sh → 命中
+- 短名 put（`put_secure ... "$COMP_SHORT"`）→ 0（不再写短名）
+- `A11Y_SERVICE_COMPONENT_FULL` in hook → 2（定义+使用）
+- `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL
+
+### repair 真机行为验证（PLK110 / 192.168.31.42:5555，PASS）
+方法：重装修复后模块 → 临时把 INTERVAL 改 10s 加速 → root 清空
+`enabled_accessibility_services`+`accessibility_enabled=0` 模拟 ColorOS 清理。
+
+- **自愈**：≤10s 内 daemon 写回**全名** `pkg/pkg.Class` 且 `accessibility_enabled=1`
+  （log：`repair applied: enabled_accessibility_services=...full...` + `accessibility_enabled=1`）。
+- **不重复**：持续跑 40s（多轮）后值保持**单条全名**，log 无新增 append 行——
+  旧 bug 会每轮追加，已消除。
+- **hook Toast**：因 hook 现在同时接受全名/短名，服务正常（存全名）时判定 present、
+  不再误弹（代码路径已复核，规范化值命中 `A11Y_SERVICE_COMPONENT_FULL`）。
+- **框架副发现**：`settings put` 一个未安装的服务组件会被框架校验剔除为 null，
+  故"共存其他服务"分支无法用假组件测；真实共存场景由框架保留有效项，逻辑为
+  纯字符串拼接，已静态复核。
+
+### 最终设备状态（干净）
+`enabled_accessibility_services`=单条全名、`accessibility_enabled=1`、
+a11y 服务进程在跑、无测试残留、模块已 staged 于 `modules_update`
+（下次重启激活，间隔 120s）。
+
+**总判定：PASS**（静态 + 真机双证）

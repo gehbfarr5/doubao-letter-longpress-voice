@@ -123,6 +123,8 @@ public final class DoubaoLetterLongPressHook {
     private static final String DOUBAO_PACKAGE = "com.bytedance.android.doubaoime";
     private static final String A11Y_SERVICE_COMPONENT =
             "com.jin.doubaolongpressvoice/.DoubaoVoiceSendA11yService";
+    private static final String A11Y_SERVICE_COMPONENT_FULL =
+            "com.jin.doubaolongpressvoice/com.jin.doubaolongpressvoice.DoubaoVoiceSendA11yService";
     private static final String A11Y_SEND_WARNING_TEXT =
             "豆包语音发送：无障碍服务未启用，发送可能失败";
 
@@ -747,7 +749,10 @@ public final class DoubaoLetterLongPressHook {
             if (ctx != null) {
                 String enabledServices = Settings.Secure.getString(
                         ctx.getContentResolver(), "enabled_accessibility_services");
-                if (enabledServices == null || !enabledServices.contains(A11Y_SERVICE_COMPONENT)) {
+                boolean present = enabledServices != null
+                        && (enabledServices.contains(A11Y_SERVICE_COMPONENT_FULL)
+                        || enabledServices.contains(A11Y_SERVICE_COMPONENT));
+                if (!present) {
                     log("a11y send warning: service missing in secure settings pkg=" + pkg
                             + " enabled_accessibility_services=" + enabledServices);
                     sMainHandler.post(() -> {

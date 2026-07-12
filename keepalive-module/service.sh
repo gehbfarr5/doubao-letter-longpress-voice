@@ -1,6 +1,7 @@
 #!/system/bin/sh
 
-COMP="com.jin.doubaolongpressvoice/.DoubaoVoiceSendA11yService"
+COMP_FULL="com.jin.doubaolongpressvoice/com.jin.doubaolongpressvoice.DoubaoVoiceSendA11yService"
+COMP_SHORT="com.jin.doubaolongpressvoice/.DoubaoVoiceSendA11yService"
 INTERVAL=120
 LOG="/data/local/tmp/doubaovoicesend_keepalive.log"
 LOG_LIMIT=65536
@@ -92,24 +93,38 @@ repair_round() {
     return 1
   fi
 
+  has_component=0
   case "$cur" in
-    *"$COMP"*)
-      ensure_accessibility_enabled
-      return 0
+    *"$COMP_FULL"*)
+      has_component=1
       ;;
+  esac
+  if [ "$has_component" -eq 0 ]; then
+    case "$cur" in
+      *"$COMP_SHORT"*)
+        has_component=1
+        ;;
+    esac
+  fi
+  if [ "$has_component" -eq 1 ]; then
+    ensure_accessibility_enabled
+    return 0
+  fi
+
+  case "$cur" in
     ""|null)
-      put_secure enabled_accessibility_services "$COMP" >/dev/null
+      put_secure enabled_accessibility_services "$COMP_FULL" >/dev/null
       rc=$?
       if [ "$rc" -eq 0 ]; then
-        log_line "repair applied: enabled_accessibility_services=$COMP"
+        log_line "repair applied: enabled_accessibility_services=$COMP_FULL"
       else
-        log_line "repair failed: set enabled_accessibility_services rc=$rc value=$COMP"
+        log_line "repair failed: set enabled_accessibility_services rc=$rc value=$COMP_FULL"
       fi
       ensure_accessibility_enabled
       return 0
       ;;
     *)
-      new_value="${cur}:$COMP"
+      new_value="${cur}:$COMP_FULL"
       put_secure enabled_accessibility_services "$new_value" >/dev/null
       rc=$?
       if [ "$rc" -eq 0 ]; then
@@ -124,7 +139,7 @@ repair_round() {
 }
 
 wait_boot_completed
-log_line "service started interval=${INTERVAL}s component=$COMP"
+log_line "service started interval=${INTERVAL}s component=$COMP_FULL"
 
 while true; do
   repair_round
