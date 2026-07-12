@@ -1,26 +1,29 @@
-# Routing Decision — v1.6.3 徽章尺寸修复
+# Routing Decision — v1.6.4 a11y keepalive Layer 3 + 失效可见化
 
 | 项 | 内容 |
 |---|---|
-| 日期 | 2026-07-10 |
-| 需求 | 修复 zone 反馈徽章尺寸偏大（比例兜底 283px vs 真实 201px） |
+| 日期 | 2026-07-12 |
+| 需求 | ChatGPT 划到工具栏发送失效 → 根因 = ColorOS 清除 a11y 授权，做 root 层保活 + 失效可见化 |
 | 类型 | 代码改动 → 完整流程 |
-| 档位 | 默认（`gpt-5.4`）|
-| **判档理由** | 改动范围明确（`effectiveToolbarHeight` + 两个级联签名改动，共 4 个调用点），根因和实现代码都已在规划阶段用完整反编译+真机诊断 build 验证过，不是架构级改动，无需质量档 |
-| **研究外包** | **不派**。根因链已在 Planner 阶段查清：`apktool d`（完整，不加 `-r`）反编译真实设备 1.3.14 APK 找到 `native_candidate_bar` 布局定义，再用临时诊断 build（`DEBUG=true` + `findViewById` 打点）在真机上验证了实际测量值（201px vs 兜底算出的 283px）。修复代码已在 HANDOFF 写好，Executor 照抄落地 |
+| 档位 | 默认（成本优先，`gpt-5.4`）|
+| **判档理由** | 改动 = ~60 行 POSIX sh 守护脚本 + module.prop（本机有已真机验收的 adb_keepalive v2.0 同构参考）+ hook 里 ~20 行 settings 读取 + Toast + 版本 bump。无架构变更、无核心逆向逻辑改动、验收全部可机检。不满足质量档（核心/架构/重构）与速度档（非 hotfix）触发词 |
+| **研究外包** | **不派**。根因已由主会话真机取证闭环（`enabled_accessibility_services` 为空 + `accessibility_enabled=0` + `stopped=true` + 07-11 实测 OK→07-12 重启后失效的时间线，三点实锤）；KSU 模块写法复用本地既有资产 `/Users/jin/Desktop/adbkeepalive-module-review/source/current/`，不涉及 GitHub 检索或 web 调研 |
 | Executor model | `codex -m gpt-5.4` |
-| Verifier | 独立子 Agent，Sonnet，lint + build + grep 取证；**这轮 orchestrator 会自己补真机验证**（LSPosed 环境上一轮已确认是好的，不存在阻塞） |
-| Task file | `orchestra/task-current.md` + `orchestra/HANDOFF-v1.6.3-badge-size.md` |
+| Verifier | 独立子 Agent，Sonnet，`sh -n` + build + grep 取证 |
+| Task file | `orchestra/task-current.md` |
 | 项目目录 | `/Users/jin/Desktop/doubao-letter-longpress-voice` |
 | Sandbox | `-s workspace-write -C <项目>`（强制）|
-| 撞车检测 | 单任务串行，无撞车风险 |
-| Repair 预算 | 最多 2 轮 |
 
-## 已知风险
+## 真机取证摘要（主会话完成，运行/分析迭代，不占执行器）
 
-| 情况 | 路由动作 |
-|---|---|
-| `EXEC_QUOTA` | 兜底 Reasonix（patch 法）|
-| `EXEC_AUTH` | 停，提示用户重登 Codex |
-| 级联签名改动漏改某个调用点导致编译失败 | HANDOFF 已列出全部 4 个调用点行号，Verifier 用 `./gradlew assembleDebug` 能直接抓到编译错误，走 repair 循环 |
-| 真机验证徽章仍然偏大（可能 `native_candidate_bar` 在有真实翻译/AI工具栏的场景下高度不同） | 记录实测数据，评估是否需要额外场景验证，不算这轮任务失败（这轮目标是把兜底从纯猜测换成有真实信号支撑的实时测量，不是保证所有场景像素级精确）|
+- `enabled_accessibility_services`=空、`accessibility_enabled`=0 → a11y 服务死，ChatGPT 发送必失效
+- `stopped=true` → Layer 1 BOOT_COMPLETED 永远收不到，无法自愈
+- AOSP hibernation 排除（`cmd app_hibernation get-state`=false）→ ColorOS 自有清理
+- 已临时 root 恢复授权，服务确认拉起（logcat `receiver registered` + `startForeground ok`）
+
+## 后续人工验证门（收口后，orchestrator 自己做 + 用户复测）
+
+1. 打包模块 zip → `ksud module install` 装真机 → root 删授权模拟 ColorOS 清理
+   → ≤120s 内自动恢复 = PASS
+2. 用户装 v1.6.4 APK 复测 ChatGPT 多轮 + 长输入。若长输入仍失效，抓
+   `logcat -s DoubaoVoiceSend` 判别次要假说（2s timeout 提前点击），另开任务
