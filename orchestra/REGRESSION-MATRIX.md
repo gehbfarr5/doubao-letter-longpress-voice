@@ -54,3 +54,26 @@ rg -n "org.telegram|baidu.ernie|google.android.apps.bard|ai.x.grok|moonshot" app
 | ASR 转写内容准确性 | ❌ 无法测 | 需要真人说话，adb 合成触摸手势无法提供音频输入，这是自动化测试的硬限制，不是本模块的问题 |
 
 结论：核心链路（触发→zone 判定→徽章渲染→跨应用发送）在真机上端到端跑通且证据扎实（Claude 场景收到了真实 AI 回复，不是猜的；ChatGPT/Nekogram 由用户手动补测确认通过）。剩余未覆盖项（Backspace 负测试、数字输入框跳过、长文本不重复上屏）风险较低，ASR 转写内容准确性本质上测不了（需要真人语音输入，不是本模块问题）。
+
+## 实测记录 — 2026-07-16（v1.6.5 / 豆包 1.3.15 / OnePlus 15）
+
+测试入口为系统设置搜索框，`EnterActionType=SEARCH(3)`；使用 USB ADB 连续触摸，不发送任何外部消息。
+
+| 场景 | 结果 | 证据与备注 |
+|---|---|---|
+| Native bridge 装载 | ✅ PASS | Vector Native API attached；`RegisterNatives hook installed`；捕获 `nativeTouch(JIIIJ)V` |
+| 26 键字母长按启动 ASR | ✅ PASS | 真机进入“正在倾听/轻触结束”态；adapter=`V1_3_15`，`J/F` probe active |
+| 工具栏提示 | ✅ PASS | raw `(500,1800)` 命中 toolbar `[0,1675-1272,1876]`；截图显示蓝色“搜索” |
+| 工具栏松手 | ✅ PASS | `AsrManager.t(3, now)`，唯一终态 `TOOLBAR_ACTION`，无 `DUP_ACTION` |
+| 移出键盘提示 | ✅ PASS | raw `(500,1450)` 命中 OUTSIDE；截图显示红色“撤回输入” |
+| 移出松手撤回 | ✅ PASS | `AsrManager.u()`，唯一终态 `CANCEL`，输入框保持为空 |
+| 原地松手 | ✅ PASS | `AsrManager.w0()`，唯一终态 `COMMIT` |
+| 框架 ACTION_CANCEL | ✅ PASS | 无条件进入唯一 `CANCEL`；无提交、无发送 |
+| 短按字母与退格 | ✅ PASS | 短按正常输入字母，退格恢复空输入；模块没有创建 gesture session |
+| 单元测试 / lint / APK | ✅ PASS | `testDebugUnitTest`、`lintDebug`（0 errors）、`assembleDebug` 通过；APK 含 arm64 native bridge 与 `assets/native_init` |
+| 9 键 / 数字层 / 浮动 / 单手 / 横屏 | ⏳ 未测 | 需要单独切换布局并做回滚 |
+| ChatGPT / Claude / Nekogram 真发送 | ⏳ 未测 | 上游 SEARCH 动作已闭环；为保护已有草稿，本轮不进行外部发送 |
+| 真人语音文字与长文本 | ⏳ 未测 | ADB 合成触摸不能提供真人麦克风内容 |
+| 重启后 / 30 分钟压力 | ⏳ 未测 | 本轮为避免再次触发 Wi-Fi 服务栈故障未重启手机 |
+
+结论：豆包 1.3.15 更新导致的两个 P0 故障（工具栏动作不可见、移出撤回失效）已在 26 键核心路径真机修复；发布前剩余工作是布局、跨 App 真发送和稳定性扩展矩阵，不再是已知主路径阻塞。
