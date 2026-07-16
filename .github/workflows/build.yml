@@ -41,10 +41,11 @@ jobs:
       - name: Grant execute permission to gradlew
         run: chmod +x gradlew
 
-      - name: Install pinned Android NDK
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager --install "ndk;29.0.13846066"
+      - name: Setup Android SDK and pinned NDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'ndk;29.0.13846066'
+          log-accepted-android-sdk-licenses: false
 
       - name: Run Android lint
         run: ./gradlew :app:lintDebug --no-daemon --stacktrace
