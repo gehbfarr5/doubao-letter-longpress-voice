@@ -9,10 +9,14 @@
 > A LSPosed module that lets you long-press any letter key in Doubao IME to start voice input — like the toolbar mic button, but from any letter. Hold to record, release in place to commit, slide to toolbar to send/newline, slide out to cancel.
 
 <p align="center">
-  <img src="docs/media/demo.gif" alt="演示：长按语音上屏、滑到工具栏发送、移出键盘撤回" width="320">
+  <img src="docs/media/demo.gif" alt="演示：蓝色触摸圆环标示长按语音上屏、滑到工具栏发送和移出键盘撤回" width="320">
 </p>
 
-> 演示内容：①长按字母键说话，原地松手后文字上屏 ②录音中滑到工具栏，出现蓝色“发送”并在松手后触发动作 ③移出键盘，出现红色“撤回输入”，松手后取消且不上屏。演示页完全离线，不会发送到网络。
+> 触摸指示：蓝色圆环表示当前按住位置；圆环从字母键出现，随手指移动，并在松手后消失。
+>
+> 演示内容：①长按字母键说话，原地松手后文字上屏 ②录音中滑到工具栏，出现蓝色“发送”，松手后触发动作 ③移出键盘，出现红色“撤回输入”，松手后取消且不上屏。
+>
+> 隐私说明：演示页完全离线，不会发送到网络；录屏顶部通知栏已裁除。
 >
 
 ---
