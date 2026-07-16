@@ -12,6 +12,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
@@ -26,11 +27,15 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.lang.ref.SoftReference;
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.HashSet;
 import java.util.Set;
+
+import com.jin.doubaolongpressvoice.ZoneResolver.Zone;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -118,6 +123,12 @@ public final class DoubaoLetterLongPressHook {
     private static final String EDITOR_VIEW_INFO =
             "com.bytedance.android.input.speech.view.o";
     private static final String DOUBAO_PACKAGE = "com.bytedance.android.doubaoime";
+    private static final String A11Y_SERVICE_COMPONENT =
+            "com.jin.doubaolongpressvoice/.DoubaoVoiceSendA11yService";
+    private static final String A11Y_SERVICE_COMPONENT_FULL =
+            "com.jin.doubaolongpressvoice/com.jin.doubaolongpressvoice.DoubaoVoiceSendA11yService";
+    private static final String A11Y_SEND_WARNING_TEXT =
+            "豆包语音发送：无障碍服务未启用，发送可能失败";
 
     private static final int MSG_LONGPRESS = 1;
     private static final int DO_FUNCTION_KEY_VOICE_START = 6;
@@ -185,6 +196,7 @@ public final class DoubaoLetterLongPressHook {
     private static final int OVERLAY_MARGIN_FALLBACK_DP = 8;
     private static final String DIMEN_NAME_OVERLAY_MARGIN =
             "asr_editor_candidate_container_padding_horizontal";
+    private static final String RES_ID_NATIVE_CANDIDATE_BAR = "native_candidate_bar";
     private static final float OVERLAY_CORNER_RADIUS_DP = 8f;  // candidate-box style
     private static final float OVERLAY_ELEVATION_DP = 3f;
     // Brand-aligned colors (opaque). Matches what Doubao uses for press states
@@ -257,16 +269,14 @@ public final class DoubaoLetterLongPressHook {
     private static final float ONE_HAND_WIDTH_RATIO = 0.85f;
     // Top exclusion = toolbar / candidates bar / ASR slide-action row.
     // Doubao 1.3.14 can report getToolbarHeight() as 0 while still rendering a
-    // sizeable top action row. Fall back to ratios measured against KeyboardView.
+    // sizeable top action row. Prefer the live native_candidate_bar height and
+    // keep these ratios only as the last-resort fallback.
     private static final float TOOLBAR_TOP_NORMAL = 0.30f;
     private static final float TOOLBAR_TOP_TALL = 0.34f;
     private static final float TALL_KBD_H_OVER_W = 0.85f;
 
     // Swipe detection threshold (dp; converted to px at runtime per device).
     private static final float SWIPE_THRESHOLD_DP = 20f;
-
-    /** In-recording finger zone (drives slide-to-action). */
-    private enum Zone { LETTER, TOOLBAR, OUTSIDE }
 
     // --- volatile per-session state ---
     private static volatile long sCancelUntilElapsed = 0L;
@@ -289,6 +299,16 @@ public final class DoubaoLetterLongPressHook {
     private static volatile ValueAnimator sColorAnimator;
     private static volatile ViewGroup sOverlayParent;
     private static volatile int sCachedToolbarHeight = -1;
+    private static volatile GestureSession sGestureSession;
+    private static volatile DoubaoCompatAdapter sCompat;
+    private static volatile boolean sNativeTouchProbeInstalled;
+    private static final ThreadLocal<Integer> sInternalNativeTouchDepth =
+            new ThreadLocal<Integer>() {
+                @Override
+                protected Integer initialValue() {
+                    return 0;
+                }
+            };
 
     // --- lazy-resolved Doubao internals ---
     private static volatile Object sUserInteractiveMgr;
@@ -314,8 +334,19 @@ public final class DoubaoLetterLongPressHook {
     public static void install(XC_LoadPackage.LoadPackageParam lpparam) {
         ClassLoader cl = lpparam.classLoader;
         sClassLoader = cl;
+        sCompat = DoubaoCompatAdapter.resolve(cl);
+        diag("capability probe family=" + sCompat.family()
+                + " detail=" + sCompat.diagnostic());
+        if (!sCompat.isSupported()) {
+            diag("unsupported Doubao build; gesture takeover disabled");
+            return;
+        }
         installHandlerHook(cl);
         installTouchHook(cl);
+        installNativeTouchProbe(cl);
+        if (sCompat.hasNativeSurface()) {
+            installNativeAsrSurfaceHook(cl);
+        }
         installCommitSuppressionHooks(cl);
         installImeLifecycleHook(cl);
     }
@@ -326,10 +357,10 @@ public final class DoubaoLetterLongPressHook {
             Class<?> kvClass = XposedHelpers.findClass(KEYBOARD_VIEW, cl);
             Class<?> handlerInner = findHandlerInnerClass(kvClass);
             if (handlerInner == null) {
-                log("ERR: cannot locate KeyboardView inner Handler class");
+                diag("ERR cannot locate KeyboardView inner Handler class");
                 return;
             }
-            log("located inner Handler class: " + handlerInner.getName());
+            diag("located inner Handler class: " + handlerInner.getName());
 
             XposedHelpers.findAndHookMethod(handlerInner, "handleMessage", Message.class,
                     new XC_MethodHook() {
@@ -342,76 +373,123 @@ public final class DoubaoLetterLongPressHook {
                                 }
                                 Object kv = extractKeyboardView(param.thisObject);
                                 if (!(kv instanceof View)) {
+                                    diag("gate=keyboard_view_unavailable handler="
+                                            + param.thisObject.getClass().getName());
                                     return;
                                 }
                                 View kvView = (View) kv;
                                 int x = msg.arg1;
                                 int y = msg.arg2;
-                                int w = kvView.getWidth();
-                                int h = kvView.getHeight();
-                                int kbdType = readKbdType(cl);
-                                int inputClass = readInputClass(cl);
-                                int toolbarHeight = (sCachedToolbarHeight > 0)
-                                        ? sCachedToolbarHeight : readToolbarHeight(cl);
-
-                                if (isNonTextInputClass(inputClass)) {
-                                    log("gate=non_text_input inputClass=0x"
-                                            + Integer.toHexString(inputClass)
-                                            + " kbdType=" + kbdType + " skip");
-                                    return;
+                                // 1.3.15 uses the JNI long-press sentinel as the authoritative
+                                // trigger. Keeping the Handler path for 1.3.14 preserves its
+                                // already-proven behavior and avoids two competing start owners.
+                                if (!sCompat.hasNativeSurface()
+                                        && tryStartGesture(cl, kvView, x, y,
+                                        "KeyboardView.Handler")) {
+                                    param.setResult(null);
                                 }
-                                if (KBD_TYPE_BLACKLIST.contains(kbdType)) {
-                                    log("gate=blacklisted_layer kbdType=" + kbdType + " skip");
-                                    return;
-                                }
-                                if (!modeAllowed(cl, kvView)) {
-                                    log("gate=mode_blocked (floating/oneHand) skip");
-                                    return;
-                                }
-                                if (!isLetterZone(x, y, w, h, kbdType, toolbarHeight)) {
-                                    log("gate=geom_outside x=" + x + " y=" + y
-                                            + " w=" + w + " h=" + h + " kbdType=" + kbdType
-                                            + " toolbarH=" + toolbarHeight);
-                                    return;
-                                }
-                                float thresholdSq = ensureSwipeThresholdPxSq(kvView);
-                                float maxDispSq = sMaxDisplacementSq;
-                                if (maxDispSq > thresholdSq) {
-                                    log("gate=swipe maxDisp=" + Math.sqrt(maxDispSq)
-                                            + "px threshold=" + Math.sqrt(thresholdSq)
-                                            + "px (" + SWIPE_THRESHOLD_DP + "dp) skip");
-                                    return;
-                                }
-
-                                log("HIT letter long-press x=" + x + " y=" + y
-                                        + " w=" + w + " h=" + h + " kbdType=" + kbdType
-                                        + " toolbarH=" + toolbarHeight
-                                        + " -> DoFunctionKey(6)");
-                                sCancelUntilElapsed = 0L;
-                                cancelPendingCommit();
-                                sSuppressNextUp = true;
-                                sAsrStartConfirmed = false;
-                                sCurrentZone = Zone.LETTER;
-                                sRecordingEnterOrdinal = resolveEffectiveEnterOrdinal(cl);
-                                sLastZoneChangeTs = SystemClock.elapsedRealtime();
-                                param.setResult(null);
-                                triggerVoiceStart(cl);
-                                sendCancelToNative(kvView, x, y);
-                                performSpeechStartFeedback();
-                                ensureOverlay(cl, effectiveToolbarHeight(w, h, toolbarHeight));
-                                scheduleAsrStartVerification(cl);
                             } catch (Throwable t) {
-                                log("ERR handleMessage hook: " + Log.getStackTraceString(t));
+                                diag("ERR handleMessage hook: " + Log.getStackTraceString(t));
                             }
                         }
                     });
-            log("hooked " + handlerInner.getName() + "#handleMessage(Message)");
+            diag("hooked " + handlerInner.getName() + "#handleMessage(Message)");
         } catch (Throwable t) {
-            log("ERR install handler hook: " + Log.getStackTraceString(t));
+            diag("ERR install handler hook: " + Log.getStackTraceString(t));
         }
     }
 
-    // ===== Hook 2: KeyboardView.onTouchEvent — track swipe; suppress UP/CANCEL =====
+    private static boolean tryStartGesture(ClassLoader cl, View kvView, int x, int y,
+                                           String source) {
+        try {
+            if (sGestureSession != null && sGestureSession.isActive()) {
+                diag("gesture start ignored: active id=" + sGestureSession.id
+                        + " source=" + source);
+                return false;
+            }
+            int w = kvView.getWidth();
+            int h = kvView.getHeight();
+            int kbdType = readKbdType(cl);
+            int inputClass = readInputClass(cl);
+            int toolbarHeight = (sCachedToolbarHeight > 0)
+                    ? sCachedToolbarHeight : readToolbarHeight(cl);
+            if (isNonTextInputClass(inputClass)) {
+                diag("gate=non_text_input inputClass=0x"
+                        + Integer.toHexString(inputClass) + " kbdType=" + kbdType);
+                return false;
+            }
+            if (KBD_TYPE_BLACKLIST.contains(kbdType)) {
+                diag("gate=blacklisted_layer kbdType=" + kbdType);
+                return false;
+            }
+            if (!modeAllowed(cl, kvView)) {
+                diag("gate=mode_blocked (floating/oneHand)");
+                return false;
+            }
+            boolean inLetterZone = sCompat.hasNativeSurface()
+                    ? isLetterZoneWithoutToolbar(x, y, w, h, kbdType)
+                    : isLetterZone(cl, x, y, w, h, kbdType, toolbarHeight);
+            if (!inLetterZone) {
+                diag("gate=geom_outside x=" + x + " y=" + y
+                        + " w=" + w + " h=" + h + " kbdType=" + kbdType
+                        + " toolbarH=" + toolbarHeight + " source=" + source);
+                return false;
+            }
+            float thresholdSq = ensureSwipeThresholdPxSq(kvView);
+            if (sMaxDisplacementSq > thresholdSq) {
+                diag("gate=swipe maxDisp=" + Math.sqrt(sMaxDisplacementSq)
+                        + "px threshold=" + Math.sqrt(thresholdSq)
+                        + "px source=" + source);
+                return false;
+            }
+            ZoneResolver.Geometry geometry = captureGlobalGeometry(cl, kvView);
+            if (sCompat.hasNativeSurface()
+                    && (geometry == null || !geometry.isUsable())) {
+                diag("gesture rejected: unusable global geometry " + geometry);
+                return false;
+            }
+
+            sCancelUntilElapsed = 0L;
+            cancelPendingCommit();
+            sSuppressNextUp = true;
+            sAsrStartConfirmed = false;
+            sCurrentZone = Zone.LETTER;
+            sRecordingEnterOrdinal = resolveEffectiveEnterOrdinal(cl);
+            sLastZoneChangeTs = SystemClock.elapsedRealtime();
+            GestureSession session = new GestureSession(
+                    geometry, sRecordingEnterOrdinal, sLastZoneChangeTs);
+            sGestureSession = session;
+            triggerVoiceStart(cl);
+            sendCancelToNative(kvView, x, y);
+            performSpeechStartFeedback();
+            int overlayHeight = geometry != null && geometry.toolbar != null
+                    ? geometry.toolbar.height()
+                    : effectiveToolbarHeight(cl, w, h, toolbarHeight);
+            ensureOverlay(cl, overlayHeight);
+            diag("gesture start id=" + session.id + " family=" + sCompat.family()
+                    + " source=" + source + " ordinal=" + session.enterOrdinal
+                    + " " + geometry);
+            scheduleAsrStartVerification(cl);
+            return true;
+        } catch (Throwable t) {
+            diag("ERR start gesture source=" + source + ": "
+                    + Log.getStackTraceString(t));
+            return false;
+        }
+    }
+
+    static boolean onNativeLongPress(Object keyboardView, int x, int y) {
+        ClassLoader cl = sClassLoader;
+        if (!(keyboardView instanceof View) || cl == null || sCompat == null
+                || !sCompat.hasNativeSurface()) {
+            diag("native bridge rejected: hook state unavailable");
+            return false;
+        }
+        return tryStartGesture(cl, (View) keyboardView, x, y,
+                "JNI.RegisterNatives/nativeTouch(-1)");
+    }
+
+    // ===== Hook 2: KeyboardView.onTouchEvent — pre-ASR tracking + legacy owner =====
     private static void installTouchHook(final ClassLoader cl) {
         try {
             XposedHelpers.findAndHookMethod(KEYBOARD_VIEW, cl, "onTouchEvent", MotionEvent.class,
@@ -424,7 +502,6 @@ public final class DoubaoLetterLongPressHook {
                                     return;
                                 }
                                 int action = ev.getAction() & 255;
-
                                 if (action == MotionEvent.ACTION_DOWN) {
                                     sDownX = ev.getX();
                                     sDownY = ev.getY();
@@ -436,84 +513,270 @@ public final class DoubaoLetterLongPressHook {
                                     if (distSq > sMaxDisplacementSq) {
                                         sMaxDisplacementSq = distSq;
                                     }
-                                    // While voice is active, track zone for slide-to-action.
-                                    if (sSuppressNextUp && param.thisObject instanceof View) {
-                                        View vv = (View) param.thisObject;
-                                        maybeUpdateZone(cl, vv, ev.getX(), ev.getY(),
-                                                vv.getWidth(), vv.getHeight());
-                                    }
                                 }
-
-                                if (!sSuppressNextUp) {
-                                    return;
+                                if (!sCompat.hasNativeSurface()) {
+                                    handleLegacyKeyboardTouch(cl, param, ev, action);
                                 }
-                                if (action != MotionEvent.ACTION_UP
-                                        && action != MotionEvent.ACTION_CANCEL) {
-                                    return;
-                                }
-                                try {
-                                    Handler h = (Handler) XposedHelpers.getObjectField(
-                                            param.thisObject, "mHandler");
-                                    if (h != null) {
-                                        h.removeMessages(MSG_LONGPRESS);
-                                    }
-                                } catch (Throwable ignore) {
-                                }
-                                sSuppressNextUp = false;
-
-                                // Determine release zone (CANCEL always = OUTSIDE; UP uses coord).
-                                Zone releaseZone;
-                                float ux = 0f, uy = 0f;
-                                int vw = 0, vh = 0;
-                                if (action == MotionEvent.ACTION_CANCEL) {
-                                    releaseZone = Zone.OUTSIDE;
-                                } else if (param.thisObject instanceof View) {
-                                    View vv = (View) param.thisObject;
-                                    ux = ev.getX();
-                                    uy = ev.getY();
-                                    vw = vv.getWidth();
-                                    vh = vv.getHeight();
-                                    int tbH = (sCachedToolbarHeight > 0)
-                                            ? sCachedToolbarHeight : readToolbarHeight(cl);
-                                    releaseZone = computeZone(ux, uy, vw, vh, tbH);
-                                } else {
-                                    releaseZone = sCurrentZone;
-                                }
-
-                                switch (releaseZone) {
-                                    case OUTSIDE:
-                                        cancelPendingCommit();
-                                        cancelVoice(cl);
-                                        log("release action=" + actionName(action)
-                                                + " coord=(" + ux + "," + uy + ")/" + vw + "x" + vh
-                                                + " zone=OUTSIDE -> cancel");
-                                        break;
-                                    case TOOLBAR:
-                                        cancelPendingCommit();
-                                        commitAndDispatchToolbarAction(cl);
-                                        log("release action=" + actionName(action)
-                                                + " coord=(" + ux + "," + uy + ")/" + vw + "x" + vh
-                                                + " zone=TOOLBAR -> action dispatch");
-                                        break;
-                                    default:
-                                        commitVoice(cl);
-                                        log("release action=" + actionName(action)
-                                                + " coord=(" + ux + "," + uy + ")/" + vw + "x" + vh
-                                                + " zone=LETTER -> commit");
-                                        break;
-                                }
-                                // Reset zone state and hide overlay.
-                                sCurrentZone = Zone.LETTER;
-                                updateOverlayForZone(Zone.LETTER, 0, cl);
-                                param.setResult(true);
                             } catch (Throwable t) {
-                                log("ERR onTouchEvent hook: " + Log.getStackTraceString(t));
+                                diag("ERR KeyboardView before hook: " + Log.getStackTraceString(t));
+                            }
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (!sCompat.hasNativeSurface()) {
+                                return;
+                            }
+                            try {
+                                MotionEvent ev = (MotionEvent) param.args[0];
+                                GestureSession session = sGestureSession;
+                                if (ev == null || session == null || !session.isActive()
+                                        || session.owner() == GestureSession.Owner.NATIVE_ASR_SURFACE) {
+                                    return;
+                                }
+                                if (session.claim(GestureSession.Owner.UNCLAIMED,
+                                        GestureSession.Owner.KEYBOARD_VIEW)
+                                        || session.owner() == GestureSession.Owner.KEYBOARD_VIEW) {
+                                    handleGlobalGestureEvent(cl, ev, session, "KeyboardView-after");
+                                }
+                            } catch (Throwable t) {
+                                diag("ERR KeyboardView after hook: " + Log.getStackTraceString(t));
                             }
                         }
                     });
-            log("hooked " + KEYBOARD_VIEW + "#onTouchEvent(MotionEvent)");
+            diag("hooked " + KEYBOARD_VIEW + "#onTouchEvent(MotionEvent)");
         } catch (Throwable t) {
-            log("ERR install touch hook: " + Log.getStackTraceString(t));
+            diag("ERR install touch hook: " + Log.getStackTraceString(t));
+        }
+    }
+
+    private static void handleLegacyKeyboardTouch(ClassLoader cl,
+                                                  XC_MethodHook.MethodHookParam param,
+                                                  MotionEvent ev, int action) {
+        if (action == MotionEvent.ACTION_MOVE && sSuppressNextUp
+                && param.thisObject instanceof View) {
+            View vv = (View) param.thisObject;
+            maybeUpdateZone(cl, vv, ev.getX(), ev.getY(), vv.getWidth(), vv.getHeight());
+        }
+        if (!sSuppressNextUp || (action != MotionEvent.ACTION_UP
+                && action != MotionEvent.ACTION_CANCEL)) {
+            return;
+        }
+        try {
+            Handler h = (Handler) XposedHelpers.getObjectField(param.thisObject, "mHandler");
+            if (h != null) {
+                h.removeMessages(MSG_LONGPRESS);
+            }
+        } catch (Throwable ignore) {
+        }
+        Zone releaseZone;
+        if (action == MotionEvent.ACTION_CANCEL) {
+            releaseZone = Zone.OUTSIDE;
+        } else if (param.thisObject instanceof View) {
+            View vv = (View) param.thisObject;
+            int tbH = (sCachedToolbarHeight > 0)
+                    ? sCachedToolbarHeight : readToolbarHeight(cl);
+            releaseZone = computeZone(cl, ev.getX(), ev.getY(),
+                    vv.getWidth(), vv.getHeight(), tbH);
+        } else {
+            releaseZone = sCurrentZone;
+        }
+        finishGesture(cl, sGestureSession, releaseZone, action, "KeyboardView-legacy");
+        param.setResult(true);
+    }
+
+    /** 1.3.15 trigger owner plus a read-only probe for later JNI events. */
+    private static void installNativeTouchProbe(final ClassLoader cl) {
+        try {
+            XposedHelpers.findAndHookMethod(KEYBOARD_VIEW, cl, "nativeTouch",
+                    long.class, int.class, int.class, int.class, long.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            int action = (Integer) param.args[3];
+                            boolean internal = sInternalNativeTouchDepth.get() > 0;
+                            if (action == -1 && !internal && sCompat.hasNativeSurface()
+                                    && param.thisObject instanceof View) {
+                                int x = (Integer) param.args[1];
+                                int y = (Integer) param.args[2];
+                                diag("nativeTouch longpress sentinel local=(" + x + "," + y + ")");
+                                if (tryStartGesture(cl, (View) param.thisObject, x, y,
+                                        "KeyboardView.nativeTouch(-1)")) {
+                                    // nativeTouch is void; suppress only when our takeover started.
+                                    param.setResult(null);
+                                    return;
+                                }
+                            }
+                            GestureSession session = sGestureSession;
+                            if (session == null || !session.isActive()) {
+                                return;
+                            }
+                            if (action != MotionEvent.ACTION_MOVE || DEBUG) {
+                                diag("nativeTouch probe id=" + session.id
+                                        + " action=" + actionName(action)
+                                        + " local=(" + param.args[1] + "," + param.args[2] + ")"
+                                        + " internal=" + internal);
+                            }
+                        }
+                    });
+            sNativeTouchProbeInstalled = true;
+            diag("Java nativeTouch hook registered; runtime interception unproven");
+        } catch (Throwable t) {
+            sNativeTouchProbeInstalled = false;
+            diag("nativeTouch probe unavailable: " + t.getClass().getSimpleName());
+        }
+    }
+
+    /** 1.3.15 owner: events forwarded by KeyboardView.preHandleTouchEvent. */
+    private static void installNativeAsrSurfaceHook(final ClassLoader cl) {
+        try {
+            Class<?> surface = sCompat.nativeSurfaceClass();
+            XposedHelpers.findAndHookMethod(surface, "onTouchEvent", MotionEvent.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                MotionEvent ev = (MotionEvent) param.args[0];
+                                GestureSession session = sGestureSession;
+                                if (ev == null || session == null || !session.isActive()) {
+                                    return;
+                                }
+                                if (session.claim(GestureSession.Owner.UNCLAIMED,
+                                        GestureSession.Owner.NATIVE_ASR_SURFACE)) {
+                                    diag("gesture owner id=" + session.id
+                                            + " -> NATIVE_ASR_SURFACE");
+                                }
+                                if (session.owner() != GestureSession.Owner.NATIVE_ASR_SURFACE) {
+                                    return;
+                                }
+                                int action = ev.getAction() & 255;
+                                handleGlobalGestureEvent(cl, ev, session, "AsrLongPressView");
+                                if (action == MotionEvent.ACTION_UP
+                                        || action == MotionEvent.ACTION_CANCEL) {
+                                    // Our terminal action replaces the built-in horizontal action.
+                                    param.setResult(true);
+                                }
+                            } catch (Throwable t) {
+                                diag("ERR native ASR surface hook: " + Log.getStackTraceString(t));
+                            }
+                        }
+                    });
+            diag("native ASR surface hook installed: " + surface.getName());
+        } catch (Throwable t) {
+            diag("ERR install native ASR surface hook: " + Log.getStackTraceString(t));
+        }
+    }
+
+    private static void handleGlobalGestureEvent(ClassLoader cl, MotionEvent ev,
+                                                 GestureSession session, String source) {
+        if (session == null || !session.isActive()) {
+            return;
+        }
+        int action = ev.getAction() & 255;
+        float rawX = ev.getRawX();
+        float rawY = ev.getRawY();
+        if (action == MotionEvent.ACTION_MOVE) {
+            updateGlobalZone(cl, session, rawX, rawY, source);
+            return;
+        }
+        if (action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL) {
+            return;
+        }
+        Zone releaseZone;
+        if (action == MotionEvent.ACTION_CANCEL) {
+            // CANCEL is never allowed to commit or send. It is a safe cancellation
+            // terminal even when the framework supplies no meaningful final point.
+            releaseZone = Zone.OUTSIDE;
+        } else {
+            releaseZone = resolveGlobalZone(session, rawX, rawY);
+            session.recordPoint(rawX, rawY, releaseZone);
+        }
+        finishGesture(cl, session, releaseZone, action, source);
+    }
+
+    private static void updateGlobalZone(ClassLoader cl, GestureSession session,
+                                         float rawX, float rawY, String source) {
+        Zone next = resolveGlobalZone(session, rawX, rawY);
+        session.recordPoint(rawX, rawY, next);
+        if (next == sCurrentZone) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (now - sLastZoneChangeTs < ZONE_DEBOUNCE_MS) {
+            return;
+        }
+        Zone prev = sCurrentZone;
+        sCurrentZone = next;
+        sLastZoneChangeTs = now;
+        int toolbarHeight = session.geometry != null && session.geometry.toolbar != null
+                ? session.geometry.toolbar.height() : 0;
+        ensureOverlay(cl, toolbarHeight);
+        updateOverlayForZone(next, session.enterOrdinal, cl);
+        if (next == Zone.TOOLBAR || next == Zone.OUTSIDE) {
+            performZoneSelectionFeedback();
+        }
+        diag("zone id=" + session.id + " " + prev + " -> " + next
+                + " raw=(" + rawX + "," + rawY + ") source=" + source
+                + " geometry=" + session.geometry);
+    }
+
+    private static Zone resolveGlobalZone(GestureSession session, float rawX, float rawY) {
+        try {
+            return ZoneResolver.resolve(rawX, rawY, session.geometry);
+        } catch (Throwable t) {
+            diag("ERR resolve global zone id=" + session.id + ": " + t.getMessage());
+            return Zone.OUTSIDE;
+        }
+    }
+
+    private static void finishGesture(ClassLoader cl, GestureSession session,
+                                      Zone releaseZone, int action, String source) {
+        if (session == null) {
+            return;
+        }
+        GestureSession.Terminal terminal;
+        switch (releaseZone) {
+            case OUTSIDE:
+                terminal = GestureSession.Terminal.CANCEL;
+                break;
+            case TOOLBAR:
+                terminal = GestureSession.Terminal.TOOLBAR_ACTION;
+                break;
+            default:
+                terminal = GestureSession.Terminal.COMMIT;
+                break;
+        }
+        if (!session.finish(terminal)) {
+            diag("DUP_ACTION id=" + session.id + " existing=" + session.terminal()
+                    + " attempted=" + terminal + " source=" + source);
+            return;
+        }
+        sSuppressNextUp = false;
+        cancelPendingCommit();
+        try {
+            switch (terminal) {
+                case CANCEL:
+                    cancelVoice(cl);
+                    break;
+                case TOOLBAR_ACTION:
+                    commitAndDispatchToolbarAction(cl);
+                    break;
+                case COMMIT:
+                    commitVoice(cl);
+                    break;
+                default:
+                    break;
+            }
+        } finally {
+            diag("gesture finish id=" + session.id + " terminal=" + terminal
+                    + " action=" + actionName(action) + " source=" + source
+                    + " raw=(" + session.lastRawX + "," + session.lastRawY + ")");
+            sCurrentZone = Zone.LETTER;
+            sRecordingEnterOrdinal = -1;
+            updateOverlayForZone(Zone.LETTER, 0, cl);
+            if (sGestureSession == session) {
+                sGestureSession = null;
+            }
         }
     }
 
@@ -653,6 +916,12 @@ public final class DoubaoLetterLongPressHook {
     }
 
     private static void resetVolatileState(String reason) {
+        GestureSession session = sGestureSession;
+        if (session != null && session.isActive()) {
+            session.finish(GestureSession.Terminal.ABORTED);
+            diag("gesture lifecycle abort id=" + session.id + " reason=" + reason);
+        }
+        sGestureSession = null;
         if (sSuppressNextUp || sCancelUntilElapsed != 0L || sPendingCommit != null
                 || sMaxDisplacementSq != 0f) {
             log("resetVolatileState reason=" + reason);
@@ -712,7 +981,9 @@ public final class DoubaoLetterLongPressHook {
             return;
         }
 
-        int enterOrdinal = resolveEffectiveEnterOrdinal(cl);
+        int enterOrdinal = sRecordingEnterOrdinal >= 0
+                ? sRecordingEnterOrdinal
+                : resolveEffectiveEnterOrdinal(cl);
         if (enterOrdinal < 0) {
             enterOrdinal = 1;
         }
@@ -733,6 +1004,32 @@ public final class DoubaoLetterLongPressHook {
      * target app's visible send button.
      */
     private static void dispatchViaA11ySend(final ClassLoader cl, final String pkg) {
+        try {
+            final android.content.Context ctx = getImeContext(cl);
+            if (ctx != null) {
+                String enabledServices = Settings.Secure.getString(
+                        ctx.getContentResolver(), "enabled_accessibility_services");
+                boolean present = enabledServices != null
+                        && (enabledServices.contains(A11Y_SERVICE_COMPONENT_FULL)
+                        || enabledServices.contains(A11Y_SERVICE_COMPONENT));
+                if (!present) {
+                    log("a11y send warning: service missing in secure settings pkg=" + pkg
+                            + " enabled_accessibility_services=" + enabledServices);
+                    sMainHandler.post(() -> {
+                        try {
+                            Toast.makeText(ctx, A11Y_SEND_WARNING_TEXT, Toast.LENGTH_SHORT).show();
+                        } catch (Throwable toastErr) {
+                            log("ERR a11y send warning toast: "
+                                    + Log.getStackTraceString(toastErr));
+                        }
+                    });
+                }
+            } else {
+                log("skip a11y send settings check: mImeService not Context");
+            }
+        } catch (Throwable t) {
+            log("ERR read enabled_accessibility_services: " + Log.getStackTraceString(t));
+        }
         // Register listener BEFORE p0() to avoid missing the all-back callback.
         subscribeAsrAllBackThen(cl, NEWLINE_ASR_MAX_WAIT_MS, () -> broadcastA11ySend(cl, pkg));
         Object mgr = ensureAsrManager(cl);
@@ -753,13 +1050,12 @@ public final class DoubaoLetterLongPressHook {
             return;
         }
         try {
-            XposedHelpers.callMethod(mgr, "t",
-                    new Class<?>[]{int.class, long.class},
-                    enterOrdinal, System.currentTimeMillis());
-            log("AsrManager.t(" + enterOrdinal + ", now) fired (specific send)");
+            sCompat.dispatch(mgr, enterOrdinal, System.currentTimeMillis());
+            diag("ASR dispatch family=" + sCompat.family()
+                    + " ordinal=" + enterOrdinal + " (specific send)");
         } catch (Throwable e) {
-            log("ERR AsrManager.t(): " + e.getClass().getSimpleName()
-                    + " -> " + Log.getStackTraceString(e));
+            diag("ERR ASR dispatch family=" + sCompat.family()
+                    + ": " + Log.getStackTraceString(e));
         }
     }
 
@@ -844,13 +1140,11 @@ public final class DoubaoLetterLongPressHook {
     /** Broadcasts a request to our AccessibilityService to click the send button. */
     private static void broadcastA11ySend(ClassLoader cl, String pkg) {
         try {
-            Class<?> jniCls = XposedHelpers.findClass(KEYBOARD_JNI, cl);
-            Object ime = XposedHelpers.getStaticObjectField(jniCls, "mImeService");
-            if (!(ime instanceof android.content.Context)) {
+            android.content.Context ctx = getImeContext(cl);
+            if (ctx == null) {
                 log("skip broadcastA11ySend: mImeService not Context");
                 return;
             }
-            android.content.Context ctx = (android.content.Context) ime;
             android.content.Intent intent = new android.content.Intent(
                     DoubaoVoiceSendA11yService.ACTION_A11Y_SEND)
                     .setPackage("com.jin.doubaolongpressvoice")
@@ -860,6 +1154,15 @@ public final class DoubaoLetterLongPressHook {
         } catch (Throwable t) {
             log("ERR broadcastA11ySend: " + Log.getStackTraceString(t));
         }
+    }
+
+    private static android.content.Context getImeContext(ClassLoader cl) {
+        Class<?> jniCls = XposedHelpers.findClass(KEYBOARD_JNI, cl);
+        Object ime = XposedHelpers.getStaticObjectField(jniCls, "mImeService");
+        if (ime instanceof android.content.Context) {
+            return (android.content.Context) ime;
+        }
+        return null;
     }
 
     /** Sends KEYCODE_ENTER (66) via {@code InputMethodService.sendDownUpKeyEvents}. */
@@ -921,6 +1224,8 @@ public final class DoubaoLetterLongPressHook {
     }
 
     private static void sendCancelToNative(View kvView, int x, int y) {
+        int previousDepth = sInternalNativeTouchDepth.get();
+        sInternalNativeTouchDepth.set(previousDepth + 1);
         try {
             Long nativeViewId = (Long) XposedHelpers.getObjectField(kvView, "mNativeViewId");
             if (nativeViewId == null || nativeViewId == 0L) {
@@ -940,6 +1245,8 @@ public final class DoubaoLetterLongPressHook {
                     nativeViewId.longValue(), x, y, ACTION_CANCEL, ts);
         } catch (Throwable t) {
             log("ERR sendCancelToNative: " + t.getClass().getSimpleName());
+        } finally {
+            sInternalNativeTouchDepth.set(previousDepth);
         }
     }
 
@@ -967,39 +1274,45 @@ public final class DoubaoLetterLongPressHook {
         }
     }
 
-    /**
-     * Defense against silent-fail ASR start (mic permission denied, model not
-     * loaded, etc.): if no preedit arrives within 300 ms, drop the
-     * UP-suppression so the next keypress is not eaten.
-     */
+    /** Waits through the normal start window; never treats one false probe as failure. */
     private static void scheduleAsrStartVerification(final ClassLoader cl) {
-        sMainHandler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (!sSuppressNextUp) {
+        GestureSession session = sGestureSession;
+        if (session == null) {
+            return;
+        }
+        sMainHandler.postDelayed(() -> verifyAsrStart(cl, session, 0), 300L);
+    }
+
+    private static void verifyAsrStart(ClassLoader cl, GestureSession session, int attempt) {
+        if (session == null || sGestureSession != session || !session.isActive()) {
+            return;
+        }
+        Object mgr = ensureAsrManager(cl);
+        if (mgr != null) {
+            try {
+                if (sCompat.isAsrActive(mgr) || sAsrStartConfirmed) {
+                    diag("ASR active id=" + session.id + " attempt=" + attempt
+                            + " family=" + sCompat.family());
                     return;
                 }
-                // sAsrStartConfirmed (text output) lags 500-1000ms behind ASR start.
-                // Use E() (process alive flag) as the authoritative rollback signal instead.
-                Object mgr = ensureAsrManager(cl);
-                if (mgr != null) {
-                    try {
-                        Object running = XposedHelpers.callMethod(mgr, "E");
-                        if (!Boolean.FALSE.equals(running)) {
-                            return; // ASR is running — no rollback
-                        }
-                    } catch (Throwable t) {
-                        log("ERR ASR verify E(): " + t.getClass().getSimpleName());
-                        return; // unknown state — don't rollback
-                    }
-                } else {
-                    return; // manager not ready — don't rollback
-                }
-                log("ASR did NOT start (E()=false at 300ms) -> rollback suppress");
-                sSuppressNextUp = false;
-                sMaxDisplacementSq = 0f;
+            } catch (Throwable t) {
+                diag("ERR ASR active probe id=" + session.id + ": "
+                        + Log.getStackTraceString(t));
+                return;
             }
-        }, 300L);
+        }
+        if (attempt < 6) {
+            sMainHandler.postDelayed(() -> verifyAsrStart(cl, session, attempt + 1), 150L);
+            return;
+        }
+        if (session.finish(GestureSession.Terminal.ABORTED)) {
+            diag("ASR start timeout id=" + session.id + " -> abort takeover");
+            sSuppressNextUp = false;
+            sMaxDisplacementSq = 0f;
+            sGestureSession = null;
+            sCurrentZone = Zone.LETTER;
+            updateOverlayForZone(Zone.LETTER, 0, cl);
+        }
     }
 
     // ===== Lazy resolution =====
@@ -1051,15 +1364,15 @@ public final class DoubaoLetterLongPressHook {
         if (sAsrManager != null) {
             return sAsrManager;
         }
-        if (sAsrResolveAttempted) {
-            return null;
-        }
         sAsrResolveAttempted = true;
         try {
-            Class<?> asrCls = XposedHelpers.findClass(ASR_MANAGER, cl);
-            sAsrManager = XposedHelpers.getStaticObjectField(asrCls, "a");
+            DoubaoCompatAdapter adapter = sCompat;
+            if (adapter == null || !adapter.isSupported()) {
+                return null;
+            }
+            sAsrManager = adapter.managerInstance();
         } catch (Throwable t) {
-            log("ERR ensureAsrManager: " + Log.getStackTraceString(t));
+            diag("ERR ensureAsrManager: " + Log.getStackTraceString(t));
         }
         return sAsrManager;
     }
@@ -1067,48 +1380,25 @@ public final class DoubaoLetterLongPressHook {
     private static boolean callAsrStop(Object mgr, boolean noWaitResult, String from,
                                        String logContext) {
         try {
-            XposedHelpers.callMethod(mgr, "s0",
-                    new Class<?>[]{boolean.class, String.class},
-                    noWaitResult, from);
-            log("AsrManager.s0(" + noWaitResult + ",\"" + from + "\") fired ("
-                    + logContext + ")");
+            sCompat.stop(mgr, noWaitResult, from);
+            diag("ASR stop family=" + sCompat.family() + " noWait=" + noWaitResult
+                    + " from=" + from + " context=" + logContext);
             return true;
         } catch (Throwable t) {
-            log("ERR AsrManager.s0(" + logContext + "): "
-                    + t.getClass().getSimpleName());
-        }
-        try {
-            XposedHelpers.callMethod(mgr, "p0",
-                    new Class<?>[]{boolean.class, String.class},
-                    noWaitResult, from);
-            log("AsrManager.p0(" + noWaitResult + ",\"" + from + "\") fired ("
-                    + logContext + ")");
-            return true;
-        } catch (Throwable t) {
-            log("ERR AsrManager.p0(" + logContext + "): "
-                    + t.getClass().getSimpleName());
+            diag("ERR ASR stop family=" + sCompat.family() + " context=" + logContext
+                    + ": " + Log.getStackTraceString(t));
             return false;
         }
     }
 
     private static void callAsrGracefulCommit(Object mgr) {
         try {
-            XposedHelpers.callMethod(mgr, "t0");
-            log("AsrManager.t0() fired (commit, graceful)");
-            return;
+            sCompat.commit(mgr);
+            diag("ASR graceful commit family=" + sCompat.family());
         } catch (Throwable t) {
-            log("ERR AsrManager.t0(): " + t.getClass().getSimpleName()
-                    + " -> fallback q0()");
+            diag("ERR ASR graceful commit family=" + sCompat.family()
+                    + ": " + Log.getStackTraceString(t));
         }
-        try {
-            XposedHelpers.callMethod(mgr, "q0");
-            log("AsrManager.q0() fired (commit, graceful)");
-            return;
-        } catch (Throwable t) {
-            log("ERR AsrManager.q0(): " + t.getClass().getSimpleName()
-                    + " -> fallback stop(false,\"\")");
-        }
-        callAsrStop(mgr, false, "", "commit fallback");
     }
 
     private static Object ensureAsrProcess(ClassLoader cl) {
@@ -1405,14 +1695,14 @@ public final class DoubaoLetterLongPressHook {
         }
     }
 
-    private static boolean isLetterZone(int x, int y, int w, int h, int kbdType,
+    private static boolean isLetterZone(ClassLoader cl, int x, int y, int w, int h, int kbdType,
                                         int toolbarHeight) {
         if (w <= 0 || h <= 0) {
             return false;
         }
-        // Primary top exclusion: Doubao's native getToolbarHeight() in pixels.
-        // When it reports 0, fall back to the measured ASR action-row ratio.
-        int topExclusion = effectiveToolbarHeight(w, h, toolbarHeight);
+        // Primary top exclusion: native getToolbarHeight(); when that is 0,
+        // prefer live native_candidate_bar height and keep ratio as last resort.
+        int topExclusion = effectiveToolbarHeight(cl, w, h, toolbarHeight);
         if (y < topExclusion) {
             return false;
         }
@@ -1435,15 +1725,94 @@ public final class DoubaoLetterLongPressHook {
         return true;
     }
 
+    /** 1.3.15 KeyboardView no longer includes the toolbar sibling in its local bounds. */
+    private static boolean isLetterZoneWithoutToolbar(int x, int y, int w, int h, int kbdType) {
+        if (w <= 0 || h <= 0 || x < 0 || y < 0 || x >= w || y >= h) {
+            return false;
+        }
+        if (y >= h * LETTER_BOTTOM) {
+            return false;
+        }
+        if (kbdType == KBD_TYPE_9KEY) {
+            return x >= w * NINE_KEY_X_LEFT && x <= w * NINE_KEY_X_RIGHT;
+        }
+        return y < h * LETTER_ROW3_TOP
+                || (x >= w * LETTER_ROW3_X_LEFT && x <= w * LETTER_ROW3_X_RIGHT);
+    }
+
     private static boolean isInCancelWindow() {
         return SystemClock.elapsedRealtime() < sCancelUntilElapsed;
     }
 
     // ===== Zone tracking + slide-to-action =====
 
-    private static int effectiveToolbarHeight(int w, int h, int toolbarHeight) {
+    private static ZoneResolver.Geometry captureGlobalGeometry(ClassLoader cl, View keyboardView) {
+        try {
+            ZoneResolver.Bounds keyboard = globalBounds(keyboardView);
+            Object inputObject = getInputView(cl);
+            if (!(inputObject instanceof ViewGroup)) {
+                return new ZoneResolver.Geometry(keyboard, null, null);
+            }
+            ViewGroup inputView = (ViewGroup) inputObject;
+            ZoneResolver.Bounds input = globalBounds(inputView);
+            int id = inputView.getResources().getIdentifier(
+                    RES_ID_NATIVE_CANDIDATE_BAR, "id", DOUBAO_PACKAGE);
+            View toolbarView = id == 0 ? null : inputView.findViewById(id);
+            ZoneResolver.Bounds toolbar = globalBounds(toolbarView);
+            ZoneResolver.Geometry geometry = new ZoneResolver.Geometry(keyboard, toolbar, input);
+            diag("geometry snapshot " + geometry + " usable=" + geometry.isUsable());
+            return geometry;
+        } catch (Throwable t) {
+            diag("ERR capture global geometry: " + Log.getStackTraceString(t));
+            return null;
+        }
+    }
+
+    private static ZoneResolver.Bounds globalBounds(View view) {
+        if (view == null) {
+            return null;
+        }
+        int width = view.getWidth();
+        int height = view.getHeight();
+        if (width <= 0 || height <= 0 || !view.isAttachedToWindow()) {
+            return null;
+        }
+        // MotionEvent.getRawX/Y is in physical screen coordinates.  Contrary to
+        // its name, getGlobalVisibleRect() is relative to the IME root view on
+        // current ColorOS builds; comparing it with rawY shifts every zone by
+        // the IME window origin.  getLocationOnScreen() is the matching space.
+        int[] location = new int[2];
+        view.getLocationOnScreen(location);
+        return new ZoneResolver.Bounds(location[0], location[1],
+                location[0] + width, location[1] + height);
+    }
+
+    private static int readNativeCandidateBarHeight(ClassLoader cl) {
+        try {
+            Object inputView = getInputView(cl);
+            if (!(inputView instanceof ViewGroup)) {
+                return -1;
+            }
+            ViewGroup vg = (ViewGroup) inputView;
+            int id = vg.getResources().getIdentifier(
+                    RES_ID_NATIVE_CANDIDATE_BAR, "id", DOUBAO_PACKAGE);
+            if (id == 0) {
+                return -1;
+            }
+            View bar = vg.findViewById(id);
+            return (bar != null && bar.getHeight() > 0) ? bar.getHeight() : -1;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    private static int effectiveToolbarHeight(ClassLoader cl, int w, int h, int toolbarHeight) {
         if (toolbarHeight > 0) {
             return toolbarHeight;
+        }
+        int live = readNativeCandidateBarHeight(cl);
+        if (live > 0) {
+            return live;
         }
         if (w <= 0 || h <= 0) {
             return 0;
@@ -1453,11 +1822,12 @@ public final class DoubaoLetterLongPressHook {
         return Math.max(1, Math.round(h * topRatio));
     }
 
-    private static Zone computeZone(float x, float y, int w, int h, int toolbarHeight) {
+    private static Zone computeZone(ClassLoader cl, float x, float y, int w, int h,
+                                    int toolbarHeight) {
         if (x < 0f || y < 0f || x >= w || y >= h) {
             return Zone.OUTSIDE;
         }
-        if (y < effectiveToolbarHeight(w, h, toolbarHeight)) {
+        if (y < effectiveToolbarHeight(cl, w, h, toolbarHeight)) {
             return Zone.TOOLBAR;
         }
         return Zone.LETTER;
@@ -1471,7 +1841,7 @@ public final class DoubaoLetterLongPressHook {
     private static void maybeUpdateZone(ClassLoader cl, View kvView, float x, float y,
                                         int w, int h) {
         int tbH = (sCachedToolbarHeight > 0) ? sCachedToolbarHeight : readToolbarHeight(cl);
-        Zone next = computeZone(x, y, w, h, tbH);
+        Zone next = computeZone(cl, x, y, w, h, tbH);
         if (next == sCurrentZone) {
             return;
         }
@@ -1483,7 +1853,7 @@ public final class DoubaoLetterLongPressHook {
         sCurrentZone = next;
         sLastZoneChangeTs = now;
         // Make sure overlay exists (may be detached after lifecycle reset).
-        ensureOverlay(cl, effectiveToolbarHeight(w, h, tbH));
+        ensureOverlay(cl, effectiveToolbarHeight(cl, w, h, tbH));
         int enterOrdinal = (sRecordingEnterOrdinal >= 0) ? sRecordingEnterOrdinal : resolveEffectiveEnterOrdinal(cl);
         updateOverlayForZone(next, enterOrdinal, cl);
         if (next == Zone.TOOLBAR || next == Zone.OUTSIDE) {
@@ -1496,16 +1866,30 @@ public final class DoubaoLetterLongPressHook {
     }
 
     /**
-     * Reads {@code ImeService.x} — the {@code InputView} singleton (a
-     * FrameLayout that hosts toolbar + candidates + keyboard).
+     * Reads the {@code InputView} singleton (a FrameLayout that hosts toolbar
+     * + candidates + keyboard) from {@code ImeService}.
      */
     private static Object getInputView(ClassLoader cl) {
         try {
             Class<?> imeServiceCls = XposedHelpers.findClass(IME_SERVICE, cl);
-            return XposedHelpers.getStaticObjectField(imeServiceCls, "x");
+            try {
+                return XposedHelpers.getStaticObjectField(imeServiceCls, "y");
+            } catch (Throwable ignore) {
+            }
+            for (Field f : imeServiceCls.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers())
+                        && FrameLayout.class.isAssignableFrom(f.getType())) {
+                    f.setAccessible(true);
+                    Object v = f.get(null);
+                    if (v != null) {
+                        return v;
+                    }
+                }
+            }
         } catch (Throwable t) {
-            return null;
+            log("ERR getInputView: " + t.getClass().getSimpleName());
         }
+        return null;
     }
 
     /** Tidies up Doubao's ASR long-press UI before sending or committing. */
@@ -1999,6 +2383,12 @@ public final class DoubaoLetterLongPressHook {
         if (!DEBUG) {
             return;
         }
+        Log.i(TAG, message);
+        XposedBridge.log(TAG + ": " + message);
+    }
+
+    /** Always-on structural diagnostics. Never include recognized or editor text. */
+    private static void diag(String message) {
         Log.i(TAG, message);
         XposedBridge.log(TAG + ": " + message);
     }

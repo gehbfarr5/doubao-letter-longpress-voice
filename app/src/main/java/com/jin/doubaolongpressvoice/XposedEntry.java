@@ -23,6 +23,9 @@ public final class XposedEntry implements IXposedHookLoadPackage {
         }
         Log.i(TAG, "loaded into " + lpparam.packageName + " (" + lpparam.processName + ")");
         XposedBridge.log(TAG + ": loaded into " + lpparam.packageName);
+        if (TARGET_PACKAGE.equals(lpparam.processName)) {
+            NativeBridge.ensureLoaded();
+        }
         DoubaoLetterLongPressHook.install(lpparam);
     }
 }

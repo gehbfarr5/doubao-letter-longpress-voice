@@ -1,0 +1,6 @@
+id=doubaovoicesend_keepalive
+name=Doubao Voice Send A11y Keepalive
+version=v1.0
+versionCode=1
+author=jin
+description=Keeps DoubaoVoiceSendA11yService enabled in secure settings (ColorOS strips it on reboot/cleanup)

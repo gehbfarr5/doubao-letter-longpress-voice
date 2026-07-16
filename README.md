@@ -9,10 +9,10 @@
 > A LSPosed module that lets you long-press any letter key in Doubao IME to start voice input — like the toolbar mic button, but from any letter. Hold to record, release in place to commit, slide to toolbar to send/newline, slide out to cancel.
 
 <p align="center">
-  <img src="docs/media/demo.gif" alt="演示：长按字母键触发语音 + 滑出取消" width="320">
+  <img src="docs/media/demo.gif" alt="演示：长按语音上屏、滑到工具栏发送、移出键盘撤回" width="320">
 </p>
 
-> 演示内容：①长按字母键触发语音输入 → 说话 → 松手上屏 ②长按触发语音后，向上滑出键盘 → 取消（不上屏）
+> 演示内容：①长按字母键说话，原地松手后文字上屏 ②录音中滑到工具栏，出现蓝色“发送”并在松手后触发动作 ③移出键盘，出现红色“撤回输入”，松手后取消且不上屏。演示页完全离线，不会发送到网络。
 >
 
 ---
@@ -40,12 +40,12 @@
 
 | 项 | 实测环境 | 备注 |
 |---|---|---|
-| 豆包输入法 | **v1.3.11 / v1.3.14** (`com.bytedance.android.doubaoime`) | v1.3.14 已适配 `AsrManager.s0/t0` 重命名和 `getToolbarHeight()==0` 的顶部工具栏判定；其它版本仍可能因混淆字段重命名失效，失败只影响该功能，不应导致输入法崩溃 |
+| 豆包输入法 | **v1.3.11 / v1.3.14 / v1.3.15** (`com.bytedance.android.doubaoime`) | v1.3.15 使用 Vector/LSPosed Native API 截获动态 `RegisterNatives`，并适配 `AsrManager.J/F/u/w0/t` 与 `AsrLongPressView`；未知签名会明确拒绝接管，不做静默降级 |
 | Android | 6.0+ (API 23+) | 取决于 LSPosed 支持范围 |
 | LSPosed | 任意版本，xposedminversion=82 | |
 | 物理键盘布局 | **26 键 QWERTY**（拼音 / 自然码 / 双拼 / 英文）+ **9 宫格拼音** | 手写键盘走 `HandWritingBoardView`，**自动跳过** |
 | 屏幕密度 | mdpi → xxxhdpi 均支持 | 滑动阈值用 dp 表达，运行时按设备 density 自适应 |
-| 屏幕分辨率 / 尺寸 | 任意（手机、平板） | 所有几何判定基于 ratio (`y/h`, `x/w`)，与分辨率无关 |
+| 屏幕分辨率 / 尺寸 | 任意（手机、平板） | v1.3.15 的 zone 判定使用 `getLocationOnScreen()` 与 `MotionEvent.rawX/rawY` 的同一屏幕坐标系，不再用局部比例猜工具栏位置 |
 | 横屏 / 平板 | 🚧 不主动适配 | 豆包横屏默认走浮动键盘，浮动模式本来就被排除；如果你的设备/版本是横屏全键盘，几何判定理论上还有效 |
 | 浮动键盘 / 单手模式 | 🚫 **不支持**（自动跳过） | 几何比例不固定，强行触发会误判 |
 | 跨应用发送（a11y） | **Claude** (`com.anthropic.claude`) + **ChatGPT** (`com.openai.chatgpt`) 实测可发送 | 发送按钮选择器：收集全部候选节点 + 排除词过滤（图片/文件/attachment 等）+ 优先级排序（精确匹配 > 右侧 > 更大面积）；找不到时 dump 候选到 logcat 便于扩展 |
@@ -84,25 +84,23 @@ JAVA_HOME=/path/to/jdk-17-or-21 ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-需要 JDK 17 或更高。Gradle 8.9 + AGP 8.7.3 经验证通过。
+需要 JDK 17 或更高、Android NDK 29。Gradle 8.9 + AGP 8.7.3 经验证通过；APK 目前只打包 `arm64-v8a` native bridge。
 
 ## 🔬 工作原理（实现速读）
 
-### Hook 1：拦截 KeyboardView Handler
-豆包键盘所有触摸 → `KeyboardView.onTouchEvent` → `nativeTouch(...)`。`ACTION_DOWN` 投递一个 500 ms 的 `MSG_LONGPRESS=1`；timer fire 后原本走 `nativeTouch(..., action=-1, ...)` 通知 native 弹长按 popup。
+### Hook 1：截获 1.3.15 的真实 native 长按哨兵
+豆包 1.3.15 通过动态 `RegisterNatives` 把 `KeyboardView.nativeTouch(JIIIJ)V` 绑定到 `libkeyboard.so`，普通 Java/Xposed 方法 hook 无法证明能截获这条调用。模块的 arm64 native bridge 使用 Vector/LSPosed Native API hook `JNIEnv->RegisterNatives`，只替换精确的方法名和签名；当 `action=-1` 的长按哨兵到达时交给 Java 能力门控，处理成功才抑制原 native popup。1.3.14 及旧版仍走其明确适配的 Java Handler 路径。
 
-我们 hook `KeyboardView$c.handleMessage(Message)`：在所有门槛通过后**吞掉原 dispatch** (`param.setResult(null)`)，改调 `KeyboardJni.DoFunctionKey(6)` 启动 ASR。
-
-### Hook 2：吞松手 + 三路 zone 决策
-在 `KeyboardView.onTouchEvent` 中标记 `sSuppressNextUp`，吞掉 `ACTION_UP / ACTION_CANCEL`，避免 native 把字母 commit 上屏。录音过程中根据手指 Y 坐标实时分三个 zone（带 50ms 防抖），松手后按当前 zone 决策：
-- **LETTER**（字母区内）→ 豆包长按面板 graceful stop（v1.3.14: `AsrManager.t0()`；旧版: `q0()`），与豆包语音面板停止按钮同路径
+### Hook 2：单手势会话 + 三路全局 zone 决策
+长按触发前保存 `KeyboardView`、`native_candidate_bar`、`InputView` 的屏幕 Rect。录音过程中用 `MotionEvent.rawX/rawY` 在同一坐标系实时判定三个 zone（带 50ms 防抖），每个 `GestureSession` 只允许一个终态：
+- **LETTER**（字母区内）→ 当前版本适配器的 graceful stop（v1.3.15: `AsrManager.w0()`；v1.3.14: `t0()`）
 - **TOOLBAR**（工具栏区域）→ 按 `EnterActionType`：
   - GO / SEARCH / SEND / SEND_EXPRESSION → `AsrManager.t(ordinal, now)`（等 ASR 整理结果再 perform action，跟豆包空格长按发送同路径）
   - 其余（换行类）→ 停止 ASR 后 `KEYCODE_ENTER`（快路径，避免等 ASR 结果包）
-- **OUTSIDE**（键盘上/下方滑出）或 `ACTION_CANCEL` → 走自定义 cancel 抑制窗口
+- **OUTSIDE**（键盘上/下方滑出）或 `ACTION_CANCEL` → v1.3.15 调官方 `AsrManager.u()` 撤回；旧版走受控 cancel 抑制窗口
 
-### Hook 3：cancel 抑制窗口
-豆包 toolbar press-and-hold 模式 (`case 6/7`) **没有真正的 cancel API**。我们的策略：
+### Hook 3：旧版本 cancel 抑制窗口
+豆包 1.3.15 已走官方 `u()`；1.3.14 及更早的 toolbar press-and-hold 模式没有等价 cancel API，因此旧版适配器使用受控抑制窗口：
 1. 打开 500 ms `sCancelUntilElapsed` 抑制窗口（cancel 通常在 200-400ms 完成）
 2. 立刻调 `KeyboardJni.finishPreedit(false)` 清掉 InputConnection composing 文本
 3. 调豆包 stop-ASR API（v1.3.14: `AsrManager.s0(true, "cancel")`；旧版: `p0(true, "cancel")`）停 ASR
@@ -129,7 +127,8 @@ Hook `ImeService.onFinishInput()` 和 `onFinishInputView(boolean)` 清掉所有 
 ## 📊 已知限制
 
 - 仅适配 **26 键 QWERTY + 9 宫格 Pinyin**。手写键盘自动跳过；浮动/单手模式自动跳过；横屏未主动适配（豆包横屏默认走浮动）。
-- 仅对豆包 **v1.3.11 / v1.3.14** 实测过。其它版本可能因混淆字段重命名失效（不会崩，只会该功能不工作）。
+- 豆包 **v1.3.15** 已在 OnePlus 15 / Android 16 / Vector-SR 上实测核心手势；v1.3.11 / v1.3.14 保留精确签名适配。其它版本若能力矩阵不匹配会拒绝接管并输出诊断日志。
+- v1.3.15 native bridge 当前仅打包 `arm64-v8a`；其它 ABI 尚未发布。
 - 横向滑出 cancel 失效：豆包 KeyboardView 在常规设备上横向铺满全屏，系统会把 x 钳到边界。**仅支持向上 / 向下滑出 cancel**。
 - "整理"效果依赖豆包 ASR 引擎自身能力（标点、同音字纠正等），不是 LLM 级别的语义改写。LLM 候选窗 (`LLMCandidate.updateCandidateList`) 不在本模块范围内。
 - 跨应用发送（a11y）目前只支持并实测 **Claude / ChatGPT**。选择器含排除词过滤 + 优先级排序，但应用大改版后节点结构可能变化（服务找不到时会把当前界面候选节点 dump 到 logcat：`adb logcat -s DoubaoVoiceSend`）。需手动授权无障碍服务。

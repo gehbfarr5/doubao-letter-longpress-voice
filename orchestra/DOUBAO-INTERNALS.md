@@ -12,6 +12,15 @@
 `t(int,long)` 仍有效。`KeyboardJni.getToolbarHeight()` 在实测 26 键界面
 返回 0，因此模块需要用 KeyboardView 顶部比例兜底识别 ASR 工具栏区域。
 
+2026-07-16 追加 v1.3.15 (`versionCode=100315010`) 适配记录：
+
+- `KeyboardView.nativeTouch(JIIIJ)V` 仍存在，但由 `libkeyboard.so` 动态 `RegisterNatives`。Vector Java hook 能注册却无法截获真机长按哨兵；v1.6.5 改用 Vector/LSPosed Native API hook `JNIEnv->RegisterNatives`，只替换精确方法名和签名，`action=-1` 时回调 Java。
+- `AsrManager.E()` 已变成错误提示态，不能作为 running probe；运行期使用 `J()`，启动期使用 `F()`，并做有限重试。
+- 官方普通松手、撤回和特定动作分别为 `w0()`、`u()`、`t(int,long)`；`InputView.T(boolean)` 仍有效。
+- `AsrLongPressView` 是录音后手势面；模块同时观察它与 `KeyboardView`，由 `GestureSession` 原子 owner/terminal 防止双消费。
+- `getGlobalVisibleRect()` 在当前 ColorOS IME window 中相对 IME root，不能与 `MotionEvent.getRawY()` 比较；`getLocationOnScreen()` 与 native longpress 的 `rawY-localY` 真机一致，因此 zone Rect 必须用后者。
+- 真机确认 26 键 Settings SEARCH 编辑器中三路终态：LETTER=`w0()`、TOOLBAR=`t(3, now)`、OUTSIDE=`u()`；框架 `ACTION_CANCEL` 始终安全取消。
+
 ## ASR Manager
 
 ### t(int, long) 内部机制
