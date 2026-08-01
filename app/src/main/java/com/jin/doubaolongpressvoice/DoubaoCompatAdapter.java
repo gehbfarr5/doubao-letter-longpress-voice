@@ -8,7 +8,7 @@ import de.robv.android.xposed.XposedHelpers;
 /** Exact-signature adapter for known Doubao ASR API families. */
 final class DoubaoCompatAdapter {
 
-    enum Family { V1_3_15, V1_3_14, UNSUPPORTED }
+    enum Family { V1_3_17, V1_3_15, V1_3_14, UNSUPPORTED }
 
     private static final String ASR_MANAGER = "com.bytedance.android.input.speech.AsrManager";
     private static final String ASR_LONG_PRESS_VIEW =
@@ -56,6 +56,14 @@ final class DoubaoCompatAdapter {
                         "v1.3.15 capabilities: surface/J/F/u/w0/t");
             }
 
+            Method newStop = optional(manager, "w0", boolean.class, String.class);
+            if (surface != null && activeJ != null && activeF != null
+                    && undo != null && newStop != null && dispatch != null) {
+                return new DoubaoCompatAdapter(Family.V1_3_17, manager, surface,
+                        activeJ, activeF, undo, newStop, dispatch,
+                        "v1.3.17 capabilities: surface/J/F/u/w0(bool,String)/t");
+            }
+
             Method activeE = optional(manager, "E");
             Method oldCancel = optional(manager, "s0", boolean.class, String.class);
             if (oldCancel == null) {
@@ -94,7 +102,8 @@ final class DoubaoCompatAdapter {
     }
 
     boolean hasNativeSurface() {
-        return nativeSurfaceClass != null && family == Family.V1_3_15;
+        return nativeSurfaceClass != null
+                && (family == Family.V1_3_15 || family == Family.V1_3_17);
     }
 
     Class<?> nativeSurfaceClass() {
@@ -128,6 +137,8 @@ final class DoubaoCompatAdapter {
     void cancel(Object manager) throws ReflectiveOperationException {
         if (family == Family.V1_3_15) {
             invoke(cancel, manager);
+        } else if (family == Family.V1_3_17) {
+            invoke(cancel, manager);
         } else {
             invoke(cancel, manager, true, "cancel");
         }
@@ -141,13 +152,23 @@ final class DoubaoCompatAdapter {
             } else {
                 invoke(commit, manager);
             }
+        } else if (family == Family.V1_3_17) {
+            if (noWaitResult) {
+                invoke(cancel, manager);
+            } else {
+                invoke(commit, manager, false, from);
+            }
         } else {
             invoke(cancel, manager, noWaitResult, from);
         }
     }
 
     void commit(Object manager) throws ReflectiveOperationException {
-        invoke(commit, manager);
+        if (family == Family.V1_3_17) {
+            invoke(commit, manager, false, "send");
+        } else {
+            invoke(commit, manager);
+        }
     }
 
     void dispatch(Object manager, int ordinal, long now) throws ReflectiveOperationException {

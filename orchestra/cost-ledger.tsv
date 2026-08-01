@@ -14,3 +14,6 @@
 2026-07-12 16:06:59	codex	gpt-5.4	EXEC_DONE	-	-	134661	-	/Users/jin/Desktop/doubao-letter-longpress-voice	task-current
 2026-07-12 16:16:52	codex	gpt-5.4	EXEC_DONE	-	-	36879	-	/Users/jin/Desktop/doubao-letter-longpress-voice	repair-task
 2026-08-01 19:09:56	codex	gpt-5.6-sol	EXEC_DONE	-	-	30348	-	/Users/jin/Desktop/doubao-letter-longpress-voice	task-current
+2026-08-01 19:13:55	codex	gpt-5.6-sol	EXEC_DONE	-	-	18791	-	/Users/jin/Desktop/doubao-letter-longpress-voice	task-current
+2026-08-01 19:30:10	codex	gpt-5.6-sol	EXEC_ERR	-	-	-	-	/Users/jin/Desktop/doubao-letter-longpress-voice	repair-task
+2026-08-01 22:25:56	codex	gpt-5.6-sol	EXEC_DONE	-	-	19151	-	/Users/jin/Desktop/doubao-letter-longpress-voice	repair-task
