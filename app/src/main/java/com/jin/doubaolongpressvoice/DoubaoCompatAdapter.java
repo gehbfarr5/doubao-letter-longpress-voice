@@ -56,12 +56,13 @@ final class DoubaoCompatAdapter {
                         "v1.3.15 capabilities: surface/J/F/u/w0/t");
             }
 
+            Method activeActive = optional(manager, "G");
             Method newStop = optional(manager, "w0", boolean.class, String.class);
-            if (surface != null && activeJ != null && activeF != null
+            if (surface != null && activeActive != null
                     && undo != null && newStop != null && dispatch != null) {
                 return new DoubaoCompatAdapter(Family.V1_3_17, manager, surface,
-                        activeJ, activeF, undo, newStop, dispatch,
-                        "v1.3.17 capabilities: surface/J/F/u/w0(bool,String)/t");
+                        activeActive, null, undo, newStop, dispatch,
+                        "v1.3.17 capabilities: surface/G/u/w0(bool,String)/t");
             }
 
             Method activeE = optional(manager, "E");
