@@ -21,6 +21,39 @@
 - `getGlobalVisibleRect()` 在当前 ColorOS IME window 中相对 IME root，不能与 `MotionEvent.getRawY()` 比较；`getLocationOnScreen()` 与 native longpress 的 `rawY-localY` 真机一致，因此 zone Rect 必须用后者。
 - 真机确认 26 键 Settings SEARCH 编辑器中三路终态：LETTER=`w0()`、TOOLBAR=`t(3, now)`、OUTSIDE=`u()`；框架 `ACTION_CANCEL` 始终安全取消。
 
+2026-08-02 追加 v1.3.17 (`versionCode=100317008`) 适配记录：手机包拉取到
+`doubao-1.3.17.apk`（155MB），JADX 产物在
+`/private/tmp/claude-501/-Users-jin/.../scratchpad/doubao-re/jadx-1.3.17/sources/`。
+
+- **核心教训：混淆字母在版本间没有语义延续性，只是恰好同名。** 1.3.15 时代
+  `J()`/`F()` 的语义是"运行期激活探针/启动期激活探针"，但 1.3.17 重新混淆后，这两个
+  字母被分配给了完全不同的方法体：`F()` 变成 `h == SpeechStatus.KErrorShowState`
+  （是否处于错误展示态），`J()` 变成 `return f3093d`——即 `mDontCommit`（"是否禁止
+  上屏"）标志，且**录音成功时会被置 `false`**，所以录音期间 `J()||F()` 恒为
+  `false||false`，是**语义反相**而非单纯"改了名字"。适配新版本时，方法名+签名匹配
+  只能证明"存在一个同名同签名的方法"，**必须额外核对方法体语义**（读 `h` 字段的
+  赋值点、关联的 `SpeechStatus`/日志字符串），不能假设字母延续代表语义延续。
+- 真正表示"正在录音/ASR 激活"的是 `G()`：`h == SpeechStatus.KTryStart || h == SpeechStatus.KStart`
+  （`h` 是 `AsrManager` 内的 `private static SpeechStatus h`，状态机
+  `KStop → KTryStart → KStart → [KStoping] → KStop`，`KErrorShowState` 是错误分支）。
+  `G()` 方法体反编译产物里带着字节跳动自己的调试字符串
+  `"[hand_write] isAsrSpeechingStatus mCurrentUIStatus = "`，可确认是官方代码自己
+  判断"正在说话"的权威依据，不是逆向猜测。
+- `w0` 从 1.3.15 的无参 `w0()`（松手 commit）变成 **`w0(boolean noWaitResult, String from)`**
+  双参统一 stop/commit/cancel 入口（内部日志 `[ASR-Flow][stopAsr][Android]`），
+  形状类似更早的 1.3.14 族 `s0(boolean,String)`。`u()`（doUndo，撤回/丢弃语义）签名
+  未变；调用侧发现 `u()` 实际是 `w0(true,"undo")` 的严格超集（多做清 pre-edit、
+  复位 view 等），二者不能互相替代。
+- `t(int,long)`（工具栏 send/search/换行等分发）、`AsrManager.a`（单例静态字段）、
+  `KeyboardView.nativeTouch(long,int,int,int,long)`（`(JIIIJ)V`，仍是 native 方法）
+  均未变，native 层不受本次版本升级影响。
+- 适配落地：`DoubaoCompatAdapter` 新增 `Family.V1_3_17`，`activePrimary` 独立探测
+  `G()`（不复用 1.3.15 分支算出的 `J`/`F`），`activeSecondary` 传 `null`；
+  `cancel()`/`stop()`/`commit()` 按 `noWaitResult` 二次分支，`noWaitResult=true` 走
+  `u()`，否则走 `w0(false, from)`，结构与 1.3.15 分支对称。真机验证：
+  `capability probe family=V1_3_17`、`ASR active id=N attempt=0`（首次轮询即成功，
+  不再因 1.2s 超时 `abort takeover`），工具栏发送/滑出撤回/原地提交三种终态均正常。
+
 ## ASR Manager
 
 ### t(int, long) 内部机制
