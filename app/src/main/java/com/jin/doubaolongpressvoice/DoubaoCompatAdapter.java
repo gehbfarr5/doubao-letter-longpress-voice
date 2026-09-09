@@ -8,7 +8,7 @@ import de.robv.android.xposed.XposedHelpers;
 /** Exact-signature adapter for known Doubao ASR API families. */
 final class DoubaoCompatAdapter {
 
-    enum Family { V1_3_17, V1_3_15, V1_3_14, UNSUPPORTED }
+    enum Family { V1_4_4, V1_3_17, V1_3_15, V1_3_14, UNSUPPORTED }
 
     private static final String ASR_MANAGER = "com.bytedance.android.input.speech.AsrManager";
     private static final String ASR_LONG_PRESS_VIEW =
@@ -42,9 +42,20 @@ final class DoubaoCompatAdapter {
     static DoubaoCompatAdapter resolve(ClassLoader cl) {
         try {
             Class<?> manager = XposedHelpers.findClass(ASR_MANAGER, cl);
-            Method dispatch = exact(manager, "t", int.class, long.class);
             Class<?> surface = optionalClass(ASR_LONG_PRESS_VIEW, cl);
 
+            Method v144Dispatch = exact(manager, "E", int.class, long.class, boolean.class);
+            Method activeT = optional(manager, "T");
+            Method undoF = optional(manager, "F");
+            Method longPressStopR0 = optional(manager, "R0");
+            if (surface != null && activeT != null && undoF != null
+                    && longPressStopR0 != null && v144Dispatch != null) {
+                return new DoubaoCompatAdapter(Family.V1_4_4, manager, surface,
+                        activeT, null, undoF, longPressStopR0, v144Dispatch,
+                        "v1.4.4 capabilities: surface/T/F/R0/E(bool)");
+            }
+
+            Method dispatch = exact(manager, "t", int.class, long.class);
             Method activeJ = optional(manager, "J");
             Method activeF = optional(manager, "F");
             Method undo = optional(manager, "u");
@@ -104,7 +115,8 @@ final class DoubaoCompatAdapter {
 
     boolean hasNativeSurface() {
         return nativeSurfaceClass != null
-                && (family == Family.V1_3_15 || family == Family.V1_3_17);
+                && (family == Family.V1_4_4
+                || family == Family.V1_3_15 || family == Family.V1_3_17);
     }
 
     Class<?> nativeSurfaceClass() {
@@ -136,9 +148,8 @@ final class DoubaoCompatAdapter {
     }
 
     void cancel(Object manager) throws ReflectiveOperationException {
-        if (family == Family.V1_3_15) {
-            invoke(cancel, manager);
-        } else if (family == Family.V1_3_17) {
+        if (family == Family.V1_4_4
+                || family == Family.V1_3_15 || family == Family.V1_3_17) {
             invoke(cancel, manager);
         } else {
             invoke(cancel, manager, true, "cancel");
@@ -147,7 +158,13 @@ final class DoubaoCompatAdapter {
 
     void stop(Object manager, boolean noWaitResult, String from)
             throws ReflectiveOperationException {
-        if (family == Family.V1_3_15) {
+        if (family == Family.V1_4_4) {
+            if (noWaitResult) {
+                invoke(cancel, manager);
+            } else {
+                invoke(commit, manager);
+            }
+        } else if (family == Family.V1_3_15) {
             if (noWaitResult) {
                 invoke(cancel, manager);
             } else {
@@ -165,7 +182,9 @@ final class DoubaoCompatAdapter {
     }
 
     void commit(Object manager) throws ReflectiveOperationException {
-        if (family == Family.V1_3_17) {
+        if (family == Family.V1_4_4) {
+            invoke(commit, manager);
+        } else if (family == Family.V1_3_17) {
             invoke(commit, manager, false, "send");
         } else {
             invoke(commit, manager);
@@ -173,7 +192,11 @@ final class DoubaoCompatAdapter {
     }
 
     void dispatch(Object manager, int ordinal, long now) throws ReflectiveOperationException {
-        invoke(dispatch, manager, ordinal, now);
+        if (family == Family.V1_4_4) {
+            invoke(dispatch, manager, ordinal, now, true);
+        } else {
+            invoke(dispatch, manager, ordinal, now);
+        }
     }
 
     private static Method exact(Class<?> cls, String name, Class<?>... parameterTypes) {

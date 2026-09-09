@@ -54,6 +54,31 @@
   `capability probe family=V1_3_17`、`ASR active id=N attempt=0`（首次轮询即成功，
   不再因 1.2s 超时 `abort takeover`），工具栏发送/滑出撤回/原地提交三种终态均正常。
 
+2026-09-10 追加 v1.4.4 (`versionCode=100404006`，内部构建 `1.4.4.10`，
+`buildTime=20260907.1307`) 适配记录：base.apk SHA-256 为
+`0a905c8f00c7c70d8e91ea3408db6abc1eb13038f9241f9666459f62b33c8b5d`，参考反编译源码
+位于 `orchestra/re-v1.4.4/`。
+
+- **混淆陷阱再次出现：方法字母跨版本复用不代表语义延续。** 1.3.17 的提交入口
+  `w0(boolean,String)` 在 1.4.4 已不存在；新版本的 `w0(int,long)` 是右侧“发送”
+  分发中的私有 ordinal-dispatch 实现，不能当作 commit。证据来自
+  `AsrManager.java:1111` 的方法体及真实调用链。统一底层入口虽为
+  `Q0(boolean,String)`，但直接调用会跳过 `F()`/`R0()` 包含的 `mDontCommit`、
+  `LongPressStop` 计时和 150ms 延迟等副作用，因此适配层只调用官方手势包装方法。
+- v1.3.17 → v1.4.4 的能力映射为：右侧发送 `t(int,long)` →
+  `E(int,long,boolean)`（`j_sendClick.java` 的真实调用点第三参传 `true`）；激活探针
+  `G()` → `T()`（仍检查 `KTryStart || KStart`，并保留
+  `"[hand_write] isAsrSpeechingStatus mCurrentUIStatus = "` 字符串锚点）；撤回
+  `u()` → `F()`；普通松手提交 `w0(boolean,String)` → `R0()`。`R0()` 先记录
+  `LongPressStop`，再延迟 150ms 调用 `Q0(false,"send")`；`F()` 调用
+  `Q0(true,"undo")`。右侧 hover 的 `forceVad` 为 `I()`，当前模块不使用。
+  `AsrLongPressView` 全限定名和 `KeyboardView.nativeTouch(long,int,int,int,long)`
+  签名未变。
+- 适配落地：`DoubaoCompatAdapter` 新增 `Family.V1_4_4` 并优先探测
+  `surface/T/F/R0/E(int,long,boolean)`；发送调用 `E(ordinal,now,true)`，取消调用
+  `F()`，提交调用无参 `R0()`，不绕过包装方法直调 `Q0`。模块版本由 v1.6.6
+  升至 v1.6.7。真机验证：待 orchestrator 回填。
+
 ## ASR Manager
 
 ### t(int, long) 内部机制
