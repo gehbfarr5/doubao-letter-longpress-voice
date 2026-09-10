@@ -77,7 +77,15 @@
 - 适配落地：`DoubaoCompatAdapter` 新增 `Family.V1_4_4` 并优先探测
   `surface/T/F/R0/E(int,long,boolean)`；发送调用 `E(ordinal,now,true)`，取消调用
   `F()`，提交调用无参 `R0()`，不绕过包装方法直调 `Q0`。模块版本由 v1.6.6
-  升至 v1.6.7。真机验证：待 orchestrator 回填。
+  升至 v1.6.7。真机验证（PLK110 / 3B166Q00SX000000，2026-09-10）：root pm install
+  升级到位后 `am force-stop com.bytedance.android.doubaoime` 触发重新注入，logcat
+  确认 `capability probe family=V1_4_4 detail=v1.4.4 capabilities: surface/T/F/R0/E(bool)`，
+  四个 hook 点（`KeyboardView$c#handleMessage`、`KeyboardView#onTouchEvent`、
+  native nativeTouch、`AsrLongPressView` native surface）全部挂载成功。实际长按
+  字母键 → `gesture start family=V1_4_4` → `ASR active id=1 attempt=0 family=V1_4_4`
+  （确认 `T()` 探针运行时读数正确）→ 原地松手 → `ASR graceful commit family=V1_4_4`
+  → `gesture finish terminal=COMMIT`，全程无 `ERR` 行；同步截图确认豆包"正在倾听"
+  语音面板与状态栏录音图标正常出现。用户本人另行手动测试确认无问题。
 
 ## ASR Manager
 
