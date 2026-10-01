@@ -294,3 +294,26 @@ v1.3.14 差异：
 7. `KeyboardJni.onAsrSetPreedit(String)` / `onAsrCommitPreeditText()`：仍是 commit/preedit 抑制的有效 hook 点，但不应再作为 ASR complete 的权威信号。
 8. `KeyboardJni.performLLMRequest(int)`、`com.bytedance.android.input.llm.a` (`LLMCandidate.updateCandidateList`) 和 `LLMRequest`：LLM candidate window 入口，后续做候选窗/改写功能时有价值。
 9. `AsrEditorLayoutView`：普通语音面板入口，stop button、backspace swipe、ASR 编辑区 UI 都在这里。
+
+## 2026-09-22：豆包 1.4.5（100405008）/ 模块 v1.6.8
+
+当前安装包 SHA-256：`542cf3bdb3718ad00f5e35352e5fab71bde02bcef2bd196fd10633c9c46dec34`。
+
+v1.6.7 注入成功但探测为 UNSUPPORTED，直接禁用手势接管；并非作用域未启用。
+按 APK 方法体和真实 UI 调用点核对的新映射：
+
+| 能力 | 1.4.5 入口 | 语义证据 |
+|---|---|---|
+| active | AsrManager.U() → boolean | KTryStart 或 KStart；T() 已变成 KErrorShowState 判定 |
+| cancel | AsrManager.G() | doUndo，先设置不提交标志，再 S0(true,"undo") |
+| commit | AsrManager.T0() | AsrLongPressView.d() 调用；LongPressStop，150 ms 后 S0(false,"send") |
+| dispatch | AsrManager.F(int,long,boolean) | speech.view.j 点击入口传 true；不得复用旧 F() 撤回语义 |
+| close UI | InputView.e0(boolean) | AsrLongPressView.d() 在 T0() 前传 false |
+| all-back status | AsrContext.V(int,boolean) | AsrProcess 在结果 g() 为 true 时调用 V(2,true) |
+| process / listener | AsrManager.e / speech.L.y(speech.Y.a) | e 为 L 实例，y 保存 listener，回调 a(result)，result.g() 表示 all-back |
+
+KeyboardView.nativeTouch(JIIIJ)V、UserInteractiveManagerNext.g(...)、EditorViewInfo.e().d() 保持可用。
+新 family 检查精确参数及返回类型；旧 family 的提交/撤回参数路径保留。
+反编译存在其它方法失败（jadx 全包报告 103 errors），上表依赖的方法体与调用点均可读；未根据失败方法的占位异常推断运行行为。
+
+PLK110 / Android 16 实机使用 Appium 执行 26 键测试，已看到录音 UI、识别文字上屏，日志记录 COMMIT / CANCEL / TOOLBAR_ACTION 三种终态和正确 V1_4_5 active probe。普通 E 点按输入 e。详细范围、哈希及测试环境限制见 `verify-report-2026-09-19-adaptation.md` 续记。

@@ -135,20 +135,7 @@ public final class DoubaoLetterLongPressHook {
     private static final int ACTION_CANCEL = MotionEvent.ACTION_CANCEL;
     private static final String ASR_CANCEL_REASON = "cancel";
     private static final long CANCEL_WINDOW_MS = 500L;
-    /**
-     * Newline-path ASR-settle parameters. Instead of a fixed delay before
-     * dispatching KEYCODE_ENTER (which races with Doubao's async ASR polish
-     * and causes the polished text to be committed twice — once by p0() and
-     * again by the IME framework's auto-finishComposingText at ENTER), we
-     * poll for Doubao's ASR callbacks ({@code onAsrSetPreedit},
-     * {@code onAsrCommitPreeditText}) to go quiet, then fire ENTER.
-     *
-     * Two-phase: (1) wait for first ASR callback after dispatch (so short
-     * text doesn't fire ENTER before ASR even responds), (2) wait for
-     * {@code NEWLINE_ASR_SETTLE_MS} of post-callback silence.
-     */
-    private static final long NEWLINE_ASR_POLL_MS = 50L;        // poll interval
-    private static final long NEWLINE_ASR_SETTLE_MS = 100L;     // quiet window before ENTER
+    /** Native all-back completion deadline; timeout aborts the terminal action. */
     private static final long NEWLINE_ASR_MAX_WAIT_MS = 2000L;  // overall cap
     /**
      * v1.2.0: Force-send package list — apps whose chat EditText DOES respond to
@@ -170,12 +157,10 @@ public final class DoubaoLetterLongPressHook {
      * See orchestra/ADAPT-PLAYBOOK.md for the full adaptation flow.
      */
     private static final java.util.Set<String> FORCE_SEND_PACKAGES =
-            new java.util.HashSet<>(java.util.Collections.singletonList(
-                    "tw.nekomimi.nekogram"));
-    private static final java.util.Set<String> A11Y_SEND_PACKAGES =
             new java.util.HashSet<>(java.util.Arrays.asList(
-                    "com.anthropic.claude",
-                    "com.openai.chatgpt"));
+                    "tw.nekomimi.nekogram", "org.telegram.messenger"));
+    private static final java.util.Set<String> A11Y_SEND_PACKAGES =
+            SendTargets.A11Y;
 
     /** {@code EditorInfo.IME_ACTION_SEND} ordinal — used for force-send override. */
     private static final int IME_ACTION_SEND_ORDINAL = 4;
@@ -281,7 +266,6 @@ public final class DoubaoLetterLongPressHook {
     // --- volatile per-session state ---
     private static volatile long sCancelUntilElapsed = 0L;
     /** Last time onAsrSetPreedit / onAsrCommitPreeditText fired — used by mode-8 ASR-settle poll. */
-    private static volatile long sLastAsrCallbackTs = 0L;
     private static volatile boolean sSuppressNextUp = false;
     private static volatile boolean sAsrStartConfirmed = false;
     private static volatile float sDownX;
@@ -320,10 +304,6 @@ public final class DoubaoLetterLongPressHook {
     private static volatile boolean sFeedbackResolveOk;
     private static volatile Object sAsrManager;
     private static volatile boolean sAsrResolveAttempted;
-    private static volatile Object sAsrProcess;
-    private static volatile boolean sAsrProcessResolveAttempted;
-    private static volatile Class<?> sListenerCls;
-    private static volatile boolean sListenerClsResolveAttempted;
     private static ClassLoader sClassLoader;
 
     private static final Handler sMainHandler = new Handler(Looper.getMainLooper());
@@ -331,24 +311,47 @@ public final class DoubaoLetterLongPressHook {
     private DoubaoLetterLongPressHook() {
     }
 
+    private static volatile boolean sReady;
+    private static final java.util.concurrent.atomic.AtomicBoolean sResolving =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     public static void install(XC_LoadPackage.LoadPackageParam lpparam) {
-        ClassLoader cl = lpparam.classLoader;
+        if (!lpparam.packageName.equals(lpparam.processName)) return;
+        final ClassLoader cl = lpparam.classLoader;
         sClassLoader = cl;
-        sCompat = DoubaoCompatAdapter.resolve(cl);
-        diag("capability probe family=" + sCompat.family()
-                + " detail=" + sCompat.diagnostic());
-        if (!sCompat.isSupported()) {
-            diag("unsupported Doubao build; gesture takeover disabled");
-            return;
-        }
-        installHandlerHook(cl);
-        installTouchHook(cl);
-        installNativeTouchProbe(cl);
-        if (sCompat.hasNativeSurface()) {
-            installNativeAsrSurfaceHook(cl);
-        }
-        installCommitSuppressionHooks(cl);
-        installImeLifecycleHook(cl);
+        XposedHelpers.findAndHookMethod(android.app.Application.class, "attach",
+                android.content.Context.class, new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        if (!sResolving.compareAndSet(false, true)) return;
+                        android.content.Context context = (android.content.Context) param.args[0];
+                        new Thread(() -> {
+                            try {
+                                DoubaoCompatAdapter resolved = AdaptiveLoader.load(context, cl,
+                                        DoubaoLetterLongPressHook::diag);
+                                sMainHandler.post(() -> {
+                                    try {
+                                        sCompat = resolved;
+                                        installHandlerHook(cl);
+                                        installTouchHook(cl);
+                                        installNativeTouchProbe(cl);
+                                        installNativeAsrSurfaceHook(cl);
+                                        installCommitSuppressionHooks(cl);
+                                        installImeLifecycleHook(cl);
+                                        installFinalSendHook(cl);
+                                        installNativeAsrTrace(cl);
+                                        sReady = true;
+                                        diag("semantic capabilities READY " + resolved.diagnostic());
+                                    } catch (Throwable error) {
+                                        sReady = false;
+                                        diag("resolver installation FAILED: " + Log.getStackTraceString(error));
+                                    }
+                                });
+                            } catch (Throwable error) {
+                                diag("resolver FAILED; original input retained: " + Log.getStackTraceString(error));
+                            }
+                        }, "DoubaoSemanticResolver").start();
+                    }
+                });
     }
 
     // ===== Hook 1: KeyboardView$c.handleMessage(MSG_LONGPRESS=1) =====
@@ -366,6 +369,7 @@ public final class DoubaoLetterLongPressHook {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!sReady) return;
                             try {
                                 Message msg = (Message) param.args[0];
                                 if (msg == null || msg.what != MSG_LONGPRESS) {
@@ -449,16 +453,18 @@ public final class DoubaoLetterLongPressHook {
                 return false;
             }
 
+            int enterOrdinal = resolveEffectiveEnterOrdinal(cl);
             sCancelUntilElapsed = 0L;
             cancelPendingCommit();
             sSuppressNextUp = true;
             sAsrStartConfirmed = false;
             sCurrentZone = Zone.LETTER;
-            sRecordingEnterOrdinal = resolveEffectiveEnterOrdinal(cl);
+            sRecordingEnterOrdinal = enterOrdinal;
             sLastZoneChangeTs = SystemClock.elapsedRealtime();
             GestureSession session = new GestureSession(
                     geometry, sRecordingEnterOrdinal, sLastZoneChangeTs);
             sGestureSession = session;
+            ensureA11yReadyIfNeeded(cl, "gesture_start", false);
             triggerVoiceStart(cl);
             sendCancelToNative(kvView, x, y);
             performSpeechStartFeedback();
@@ -472,6 +478,7 @@ public final class DoubaoLetterLongPressHook {
             scheduleAsrStartVerification(cl);
             return true;
         } catch (Throwable t) {
+            resetVolatileState("gesture start failed");
             diag("ERR start gesture source=" + source + ": "
                     + Log.getStackTraceString(t));
             return false;
@@ -480,7 +487,7 @@ public final class DoubaoLetterLongPressHook {
 
     static boolean onNativeLongPress(Object keyboardView, int x, int y) {
         ClassLoader cl = sClassLoader;
-        if (!(keyboardView instanceof View) || cl == null || sCompat == null
+        if (!sReady || !(keyboardView instanceof View) || cl == null || sCompat == null
                 || !sCompat.hasNativeSurface()) {
             diag("native bridge rejected: hook state unavailable");
             return false;
@@ -496,6 +503,7 @@ public final class DoubaoLetterLongPressHook {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!sReady) return;
                             try {
                                 MotionEvent ev = (MotionEvent) param.args[0];
                                 if (ev == null) {
@@ -524,6 +532,7 @@ public final class DoubaoLetterLongPressHook {
 
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            if (!sReady) return;
                             if (!sCompat.hasNativeSurface()) {
                                 return;
                             }
@@ -547,6 +556,7 @@ public final class DoubaoLetterLongPressHook {
             diag("hooked " + KEYBOARD_VIEW + "#onTouchEvent(MotionEvent)");
         } catch (Throwable t) {
             diag("ERR install touch hook: " + Log.getStackTraceString(t));
+            throw new IllegalStateException("required hook installation failed", t);
         }
     }
 
@@ -593,6 +603,7 @@ public final class DoubaoLetterLongPressHook {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!sReady) return;
                             int action = (Integer) param.args[3];
                             boolean internal = sInternalNativeTouchDepth.get() > 0;
                             if (action == -1 && !internal && sCompat.hasNativeSurface()
@@ -635,6 +646,7 @@ public final class DoubaoLetterLongPressHook {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!sReady) return;
                             try {
                                 MotionEvent ev = (MotionEvent) param.args[0];
                                 GestureSession session = sGestureSession;
@@ -664,6 +676,7 @@ public final class DoubaoLetterLongPressHook {
             diag("native ASR surface hook installed: " + surface.getName());
         } catch (Throwable t) {
             diag("ERR install native ASR surface hook: " + Log.getStackTraceString(t));
+            throw new IllegalStateException("required hook installation failed", t);
         }
     }
 
@@ -788,6 +801,7 @@ public final class DoubaoLetterLongPressHook {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!sReady) return;
                             try {
                                 if (!isInCancelWindow()) {
                                     return;
@@ -806,26 +820,25 @@ public final class DoubaoLetterLongPressHook {
             log("hooked " + KEYBOARD_JNI + "#commitString");
         } catch (Throwable t) {
             log("ERR hook commitString: " + Log.getStackTraceString(t));
+            throw new IllegalStateException("required hook installation failed", t);
         }
         try {
             XposedHelpers.findAndHookMethod(KEYBOARD_JNI, cl, "onAsrCommitPreeditText",
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!sReady) return;
                             if (isInCancelWindow()) {
                                 log("onAsrCommitPreeditText SWALLOWED");
                                 param.setResult(Boolean.TRUE);
                                 return;
-                            }
-                            // Update poll-fallback timestamp only when listener path unavailable.
-                            if (sAsrProcess == null) {
-                                sLastAsrCallbackTs = SystemClock.elapsedRealtime();
                             }
                         }
                     });
             log("hooked " + KEYBOARD_JNI + "#onAsrCommitPreeditText");
         } catch (Throwable t) {
             log("ERR hook onAsrCommitPreeditText: " + Log.getStackTraceString(t));
+            throw new IllegalStateException("required hook installation failed", t);
         }
         try {
             XposedHelpers.findAndHookMethod(KEYBOARD_JNI, cl, "onAsrSetPreedit",
@@ -833,15 +846,12 @@ public final class DoubaoLetterLongPressHook {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!sReady) return;
                             if (isInCancelWindow()) {
                                 log("onAsrSetPreedit SWALLOWED text="
                                         + safeText((String) param.args[0]));
                                 param.setResult(Boolean.TRUE);
                                 return;
-                            }
-                            // Update poll-fallback timestamp only when listener path unavailable.
-                            if (sAsrProcess == null) {
-                                sLastAsrCallbackTs = SystemClock.elapsedRealtime();
                             }
                             // Confirm ASR actually started on first preedit output.
                             if (sSuppressNextUp && !sAsrStartConfirmed) {
@@ -853,26 +863,27 @@ public final class DoubaoLetterLongPressHook {
             log("hooked " + KEYBOARD_JNI + "#onAsrSetPreedit");
         } catch (Throwable t) {
             log("ERR hook onAsrSetPreedit: " + Log.getStackTraceString(t));
+            throw new IllegalStateException("required hook installation failed", t);
         }
         try {
             XposedHelpers.findAndHookMethod(
                     "com.bytedance.android.input.speech.AsrContext", cl,
-                    "T", int.class, boolean.class,
+                    sCompat.contextDoneMethod(), int.class, boolean.class,
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            if (!sReady) return;
                             boolean isDone = Boolean.TRUE.equals(param.args[1]);
                             if (isDone) {
-                                if (sAsrProcess == null) {
-                                    sLastAsrCallbackTs = SystemClock.elapsedRealtime();
-                                }
-                                log("AsrContext.T phase=" + param.args[0] + " done=true");
+                                diag("AsrContext." + sCompat.contextDoneMethod() + " phase=" + param.args[0] + " done=true");
+                                sMainHandler.post(() -> dispatchCompletedNativeSend(cl));
                             }
                         }
                     });
-            log("hooked AsrContext#T");
+            log("hooked AsrContext#" + sCompat.contextDoneMethod());
         } catch (Throwable t) {
-            log("ERR hook AsrContext#T: " + t.getClass().getSimpleName());
+            log("ERR hook AsrContext#" + sCompat.contextDoneMethod() + ": " + t.getClass().getSimpleName());
+            throw new IllegalStateException("required hook installation failed", t);
         }
     }
 
@@ -881,6 +892,7 @@ public final class DoubaoLetterLongPressHook {
         XC_MethodHook resetter = new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
+                            if (!sReady) return;
                 resetVolatileState("ImeService." + param.method.getName());
             }
         };
@@ -889,6 +901,7 @@ public final class DoubaoLetterLongPressHook {
             log("hooked " + IME_SERVICE + "#onFinishInput");
         } catch (Throwable t) {
             log("ERR hook onFinishInput: " + t.getClass().getSimpleName());
+            throw new IllegalStateException("required hook installation failed", t);
         }
         try {
             XposedHelpers.findAndHookMethod(IME_SERVICE, cl, "onFinishInputView",
@@ -896,6 +909,7 @@ public final class DoubaoLetterLongPressHook {
             log("hooked " + IME_SERVICE + "#onFinishInputView(boolean)");
         } catch (Throwable t) {
             log("ERR hook onFinishInputView: " + t.getClass().getSimpleName());
+            throw new IllegalStateException("required hook installation failed", t);
         }
         try {
             XposedHelpers.findAndHookMethod(IME_SERVICE, cl, "onStartInputView",
@@ -903,19 +917,26 @@ public final class DoubaoLetterLongPressHook {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            if (!sReady) return;
                             int h = readToolbarHeight(sClassLoader);
                             if (h > 0) {
                                 sCachedToolbarHeight = h;
+                            }
+                            EditorInfo info = (EditorInfo) param.args[0];
+                            if (info != null && A11Y_SEND_PACKAGES.contains(info.packageName)) {
+                                ensureA11yReadyIfNeeded(sClassLoader, "onStartInputView", false);
                             }
                         }
                     });
             log("hooked " + IME_SERVICE + "#onStartInputView");
         } catch (Throwable t) {
             log("ERR hook onStartInputView: " + t.getClass().getSimpleName());
+            throw new IllegalStateException("required hook installation failed", t);
         }
     }
 
     private static void resetVolatileState(String reason) {
+        cancelNativeSend(reason);
         GestureSession session = sGestureSession;
         if (session != null && session.isActive()) {
             session.finish(GestureSession.Terminal.ABORTED);
@@ -947,11 +968,12 @@ public final class DoubaoLetterLongPressHook {
     // ===== Action helpers =====
 
     private static void triggerVoiceStart(ClassLoader cl) {
+        cancelNativeSend("new recording");
         try {
             Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
             XposedHelpers.callStaticMethod(jni, "DoFunctionKey", DO_FUNCTION_KEY_VOICE_START);
         } catch (Throwable t) {
-            log("ERR DoFunctionKey(6): " + Log.getStackTraceString(t));
+            throw new IllegalStateException("voice start JNI failed", t);
         }
     }
 
@@ -976,7 +998,7 @@ public final class DoubaoLetterLongPressHook {
         callInputViewCloseAsrUi(inputView, false);
 
         String pkg = currentEditorPackageName(cl);
-        if (pkg != null && A11Y_SEND_PACKAGES.contains(pkg)) {
+        if (isA11yEditor(cl, pkg)) {
             dispatchViaA11ySend(cl, pkg);
             return;
         }
@@ -1003,39 +1025,254 @@ public final class DoubaoLetterLongPressHook {
      * finalization to settle, then ask our AccessibilityService to click the
      * target app's visible send button.
      */
-    private static void dispatchViaA11ySend(final ClassLoader cl, final String pkg) {
+    private static final java.util.Set<Long> sOwnedSendIds = new java.util.HashSet<>();
+    private static NativeSend sNativeSend;
+    private static long sLastSendId;
+    private static final class NativeSend {
+        final long id;
+        boolean readyForwarded, dispatchStarted;
+        final boolean accessibility;
+        final int ordinal;
+        final String pkg;
+        final EditorInfo editor;
+        final android.view.inputmethod.InputConnection connection;
+        NativeSend(long id, String pkg, EditorInfo editor, android.view.inputmethod.InputConnection connection, boolean accessibility, int ordinal) {
+            this.id=id; this.pkg=pkg; this.editor=editor; this.connection=connection;
+            this.accessibility=accessibility; this.ordinal=ordinal;
+        }
+    }
+    private static android.inputmethodservice.InputMethodService imeService(ClassLoader cl) {
+        android.content.Context context=getImeContext(cl);
+        if(!(context instanceof android.inputmethodservice.InputMethodService))
+            throw new IllegalStateException("IME service unavailable");
+        return (android.inputmethodservice.InputMethodService)context;
+    }
+    private static volatile long sLastEnsureA11yBroadcastMs;
+    private static final long ENSURE_A11Y_COOLDOWN_MS = 1500L;
+
+    private static boolean isA11yServiceEnabledInSettings(android.content.Context ctx) {
+        if (ctx == null) return false;
+        String enabled = Settings.Secure.getString(
+                ctx.getContentResolver(), "enabled_accessibility_services");
+        int master = Settings.Secure.getInt(
+                ctx.getContentResolver(), "accessibility_enabled", 0);
+        return master == 1 && BootRestoreReceiver.containsOurService(enabled);
+    }
+
+    private static boolean isA11yServiceBoundInManager(android.content.Context ctx) {
+        if (ctx == null) return false;
         try {
-            final android.content.Context ctx = getImeContext(cl);
-            if (ctx != null) {
-                String enabledServices = Settings.Secure.getString(
-                        ctx.getContentResolver(), "enabled_accessibility_services");
-                boolean present = enabledServices != null
-                        && (enabledServices.contains(A11Y_SERVICE_COMPONENT_FULL)
-                        || enabledServices.contains(A11Y_SERVICE_COMPONENT));
-                if (!present) {
-                    log("a11y send warning: service missing in secure settings pkg=" + pkg
-                            + " enabled_accessibility_services=" + enabledServices);
-                    sMainHandler.post(() -> {
-                        try {
-                            Toast.makeText(ctx, A11Y_SEND_WARNING_TEXT, Toast.LENGTH_SHORT).show();
-                        } catch (Throwable toastErr) {
-                            log("ERR a11y send warning toast: "
-                                    + Log.getStackTraceString(toastErr));
-                        }
-                    });
+            android.view.accessibility.AccessibilityManager am =
+                    (android.view.accessibility.AccessibilityManager)
+                            ctx.getSystemService(android.content.Context.ACCESSIBILITY_SERVICE);
+            if (am == null) return false;
+            java.util.List<android.accessibilityservice.AccessibilityServiceInfo> list =
+                    am.getEnabledAccessibilityServiceList(
+                            android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK);
+            if (list == null) return false;
+            for (android.accessibilityservice.AccessibilityServiceInfo info : list) {
+                if (info == null) continue;
+                String id = info.getId();
+                if (A11Y_SERVICE_COMPONENT_FULL.equals(id) || A11Y_SERVICE_COMPONENT.equals(id)) {
+                    return true;
                 }
-            } else {
-                log("skip a11y send settings check: mImeService not Context");
+                if (info.getResolveInfo() != null && info.getResolveInfo().serviceInfo != null) {
+                    android.content.pm.ServiceInfo si = info.getResolveInfo().serviceInfo;
+                    if ("com.jin.doubaolongpressvoice".equals(si.packageName)
+                            && "com.jin.doubaolongpressvoice.DoubaoVoiceSendA11yService".equals(si.name)) {
+                        return true;
+                    }
+                }
             }
         } catch (Throwable t) {
-            log("ERR read enabled_accessibility_services: " + Log.getStackTraceString(t));
+            diag("ERR check bound a11y list: " + t.getClass().getSimpleName());
         }
-        // Register listener BEFORE p0() to avoid missing the all-back callback.
-        subscribeAsrAllBackThen(cl, NEWLINE_ASR_MAX_WAIT_MS, () -> broadcastA11ySend(cl, pkg));
-        Object mgr = ensureAsrManager(cl);
-        if (mgr != null) {
-            callAsrStop(mgr, false, "", "a11y send path pkg=" + pkg);
+        return false;
+    }
+
+    private static boolean isA11yServiceHealthy(android.content.Context ctx) {
+        return isA11yServiceEnabledInSettings(ctx) && isA11yServiceBoundInManager(ctx);
+    }
+
+    private static void ensureA11yReadyIfNeeded(ClassLoader cl, String reason, boolean force) {
+        try {
+            if (Build.VERSION.SDK_INT < 34) return;
+            String pkg = currentEditorPackageName(cl);
+            if (pkg == null || !A11Y_SEND_PACKAGES.contains(pkg)) return;
+            android.content.Context ime = getImeContext(cl);
+            if (ime == null || isA11yServiceHealthy(ime)) return;
+            requestEnsureA11y(ime, reason + ":" + pkg, force);
+        } catch (Throwable t) {
+            diag("ERR ensureA11yReadyIfNeeded: " + t.getClass().getSimpleName());
         }
+    }
+
+    private static void requestEnsureA11y(android.content.Context ctx, String reason, boolean force) {
+        long now = SystemClock.elapsedRealtime();
+        if (!force && sLastEnsureA11yBroadcastMs > 0
+                && now - sLastEnsureA11yBroadcastMs < ENSURE_A11Y_COOLDOWN_MS) {
+            return;
+        }
+        sLastEnsureA11yBroadcastMs = now;
+        try {
+            android.content.Intent intent = new android.content.Intent(BootRestoreReceiver.ACTION_ENSURE_A11Y)
+                    .setClassName("com.jin.doubaolongpressvoice",
+                            "com.jin.doubaolongpressvoice.BootRestoreReceiver")
+                    .addFlags(android.content.Intent.FLAG_INCLUDE_STOPPED_PACKAGES
+                            | android.content.Intent.FLAG_RECEIVER_FOREGROUND)
+                    .putExtra(BootRestoreReceiver.EXTRA_REASON, reason);
+            if (Build.VERSION.SDK_INT >= 34) {
+                ctx.sendBroadcast(intent, null,
+                        android.app.BroadcastOptions.makeBasic()
+                                .setShareIdentityEnabled(true).toBundle());
+            } else {
+                ctx.sendBroadcast(intent);
+            }
+            diag("sent ACTION_ENSURE_A11Y reason=" + reason);
+        } catch (Throwable t) {
+            diag("ERR send ACTION_ENSURE_A11Y: " + t.getClass().getSimpleName());
+        }
+    }
+
+    private static void dispatchViaA11ySend(final ClassLoader cl, final String pkg) {
+        cancelNativeSend("new request");
+        try {
+            android.inputmethodservice.InputMethodService ime=imeService(cl);
+            if(Build.VERSION.SDK_INT<34) {
+                diag("a11y unavailable (sdk<34); text retained pkg="+pkg);
+                Toast.makeText(ime,A11Y_SEND_WARNING_TEXT,Toast.LENGTH_SHORT).show();
+                callAsrGracefulCommit(ensureAsrManager(cl));
+                return;
+            }
+            boolean healthy=isA11yServiceHealthy(ime);
+            if(!healthy) {
+                requestEnsureA11y(ime,"dispatch_send:"+pkg,true);
+            }
+            prepareNativeSend(cl,pkg,true,IME_ACTION_SEND_ORDINAL);
+            if(!healthy) {
+                final NativeSend recovering=sNativeSend;
+                if(recovering!=null) {
+                    sMainHandler.postDelayed(()-> {
+                        if(sNativeSend==recovering && !recovering.readyForwarded) {
+                            broadcastA11ySend(cl,recovering,DoubaoVoiceSendA11yService.PREPARE,null);
+                        }
+                    },120L);
+                    sMainHandler.postDelayed(()-> {
+                        if(sNativeSend==recovering && !recovering.readyForwarded) {
+                            if(!isA11yServiceHealthy(ime)) {
+                                diag("a11y still unhealthy after recovery; text retained pkg="+pkg);
+                                Toast.makeText(ime,A11Y_SEND_WARNING_TEXT,Toast.LENGTH_SHORT).show();
+                            } else {
+                                broadcastA11ySend(cl,recovering,DoubaoVoiceSendA11yService.PREPARE,null);
+                            }
+                        }
+                    },280L);
+                }
+            }
+        } catch(Exception e) {
+            cancelNativeSend("dispatch error");
+            diag("ERR native a11y dispatch; no send: "+Log.getStackTraceString(e));
+        }
+    }
+    /** Submit the final audio frame first. Completion events, never a settling timer, arm send. */
+    private static void prepareNativeSend(ClassLoader cl,String pkg,boolean accessibility,int ordinal) throws Exception {
+        android.inputmethodservice.InputMethodService ime=imeService(cl);
+        EditorInfo editor=ime.getCurrentInputEditorInfo();
+        android.view.inputmethod.InputConnection connection=ime.getCurrentInputConnection();
+        if(editor==null || connection==null || !pkg.equals(editor.packageName))
+            throw new IllegalStateException("editor unavailable");
+        long id=Math.max(System.currentTimeMillis(),sLastSendId+1); sLastSendId=id;
+        NativeSend request=new NativeSend(id,pkg,editor,connection,accessibility,ordinal);
+        sNativeSend=request; sOwnedSendIds.add(id);
+        if(accessibility)broadcastA11ySend(cl,request,DoubaoVoiceSendA11yService.PREPARE,null);
+        sMainHandler.postDelayed(()-> {if(sNativeSend==request)cancelNativeSend("native completion deadline");},30_000L);
+        sCompat.commit(ensureAsrManager(cl));
+        diag("native send prepared id="+id+" pkg="+pkg+" accessibility="+accessibility);
+    }
+    private static void dispatchCompletedNativeSend(ClassLoader cl) {
+        NativeSend request=sNativeSend;
+        if(request==null || request.dispatchStarted)return;
+        try {
+            if(!(Boolean)sCompat.invoke("contextAllBack",sCompat.object("context")))return;
+            android.inputmethodservice.InputMethodService ime=imeService(cl);
+            if(ime.getCurrentInputEditorInfo()!=request.editor || ime.getCurrentInputConnection()!=request.connection
+                    || !request.pkg.equals(currentEditorPackageName(cl))) {
+                cancelNativeSend("editor changed before dispatch");return;
+            }
+            request.dispatchStarted=true;
+            diag("native all-back dispatch id="+request.id);
+            sCompat.dispatch(ensureAsrManager(cl),request.ordinal,request.id);
+        } catch(Exception e) {
+            cancelNativeSend("completed dispatch error");
+            diag("ERR completed dispatch: "+Log.getStackTraceString(e));
+        }
+    }
+
+    private static void installNativeAsrTrace(final ClassLoader cl) throws Exception {
+        Class<?> facade = Class.forName("com.bytedance.android.input.basic.IAppGlobals$a", false, cl);
+        int installed = 0;
+        for (java.lang.reflect.Method method : facade.getDeclaredMethods()) {
+            if (method.getReturnType() != void.class || !java.util.Arrays.equals(
+                    method.getParameterTypes(), new Class<?>[]{String.class, String.class})) continue;
+            XposedBridge.hookMethod(method, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    String tag = (String) param.args[0];
+                    if (tag == null || !(tag.contains("ASR") || tag.contains("SmartOrganize"))) return;
+                    String event = NativeAsrTrace.summarize((String) param.args[1]);
+                    if (event != null) diag("host trace " + event);
+                }
+            });
+            installed++;
+        }
+        if (installed == 0) throw new IllegalStateException("host trace facade unavailable");
+        diag("host trace attached methods=" + installed);
+    }
+
+    private static void installFinalSendHook(final ClassLoader cl) {
+        XposedBridge.hookMethod(sCompat.method("sendFinal"),new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                long id=(Long)param.args[1];
+                if(!sOwnedSendIds.contains(id))return;
+                // Keep tombstones for this process: a late/duplicate host callback must never
+                // escape into performEditorAction after its a11y request was cancelled.
+                NativeSend request=sNativeSend;
+                if(request==null || request.id!=id || request.readyForwarded) {param.setResult(null);return;}
+                if(request.accessibility)param.setResult(null);
+                try {
+                    android.inputmethodservice.InputMethodService ime=imeService(cl);
+                    if(ime.getCurrentInputEditorInfo()!=request.editor ||
+                            ime.getCurrentInputConnection()!=request.connection ||
+                            !request.pkg.equals(currentEditorPackageName(cl))) {
+                        param.setResult(null); cancelNativeSend("editor changed"); return;
+                    }
+                    boolean completed=(Boolean)sCompat.invoke("contextAllBack",sCompat.object("context"));
+                    if(!completed) {param.setResult(null);cancelNativeSend("host reached send without complete result");return;}
+                    if(!request.accessibility) {
+                        request.readyForwarded=true;
+                        diag("native action completed id="+id+" elapsedMs="+(System.currentTimeMillis()-id));
+                        return;
+                    }
+                    android.view.inputmethod.ExtractedTextRequest query=new android.view.inputmethod.ExtractedTextRequest();
+                    query.hintMaxChars=65536;
+                    android.view.inputmethod.ExtractedText extracted=request.connection.getExtractedText(query,0);
+                    if(extracted==null || extracted.text==null || extracted.startOffset!=0 ||
+                            extracted.partialStartOffset>=0 || extracted.text.length()>65536 ||
+                            extracted.text.toString().trim().isEmpty()) {
+                        cancelNativeSend("final editor text unavailable"); return;
+                    }
+                    broadcastA11ySend(cl,request,DoubaoVoiceSendA11yService.READY,extracted.text.toString());
+                    diag("native completed id="+id+" elapsedMs="+(System.currentTimeMillis()-id));
+                    request.readyForwarded=true;
+                } catch(Exception e) { param.setResult(null); cancelNativeSend("completion error");diag("ERR final send: "+Log.getStackTraceString(e)); }
+            }
+        });
+    }
+    private static void cancelNativeSend(String reason) {
+        NativeSend request=sNativeSend;
+        if(request==null)return;
+        sNativeSend=null;
+        if(request.accessibility)broadcastA11ySend(sClassLoader,request,DoubaoVoiceSendA11yService.CANCEL,null);
+        diag("native send aborted id="+request.id+" reason="+reason);
     }
 
     /**
@@ -1044,18 +1281,12 @@ public final class DoubaoLetterLongPressHook {
      * ensures the editor (e.g., WeChat) receives the polished final text.
      */
     private static void dispatchViaAsrManagerT(ClassLoader cl, int enterOrdinal) {
-        Object mgr = ensureAsrManager(cl);
-        if (mgr == null) {
-            log("skip t(): AsrManager not resolvable");
-            return;
-        }
+        cancelNativeSend("new native request");
         try {
-            sCompat.dispatch(mgr, enterOrdinal, System.currentTimeMillis());
-            diag("ASR dispatch family=" + sCompat.family()
-                    + " ordinal=" + enterOrdinal + " (specific send)");
-        } catch (Throwable e) {
-            diag("ERR ASR dispatch family=" + sCompat.family()
-                    + ": " + Log.getStackTraceString(e));
+            prepareNativeSend(cl,currentEditorPackageName(cl),false,enterOrdinal);
+        } catch(Exception e) {
+            cancelNativeSend("native prepare error");
+            diag("ERR native prepare: "+Log.getStackTraceString(e));
         }
     }
 
@@ -1068,11 +1299,7 @@ public final class DoubaoLetterLongPressHook {
      * raced with Doubao's async ASR polish — the polished text would be
      * committed once by p0 and again by IME-framework auto-finishComposingText
      * when ENTER dispatched (especially on long text where polish takes longer).
-     * We now poll {@link #sLastAsrCallbackTs} (updated by Doubao's own
-     * {@code onAsrSetPreedit}/{@code onAsrCommitPreeditText} hooks) and only
-     * fire ENTER after callbacks have been quiet for
-     * {@link #NEWLINE_ASR_SETTLE_MS}. Adaptive: short text fires fast, long
-     * text waits longer. See {@link #pollAsrSettleThen}.
+     * The native all-back callback triggers ENTER; timeout aborts it.
      */
     private static void dispatchNewlineFast(final ClassLoader cl) {
         // Register listener BEFORE p0() to avoid missing the all-back callback.
@@ -1083,77 +1310,22 @@ public final class DoubaoLetterLongPressHook {
         }
     }
 
-    /**
-     * Two-phase poll for ASR settle.
-     * <ol>
-     *   <li>Phase 1 — wait until at least one ASR callback fires AFTER
-     *       dispatch start ({@code sLastAsrCallbackTs > startTs}). This
-     *       confirms Doubao has actually responded to our {@code p0()}
-     *       trigger; without it, short text could fire ENTER before ASR
-     *       even commits, producing "ENTER then text" out-of-order
-     *       insertion.</li>
-     *   <li>Phase 2 — wait until callbacks go quiet for {@code settleMs},
-     *       meaning ASR has truly finished finalizing.</li>
-     * </ol>
-     * Re-schedules itself every {@link #NEWLINE_ASR_POLL_MS}. Capped at
-     * {@code maxWaitMs} as a timeout fallback so we never hang.
-     */
-    private static void pollAsrSettleThen(final ClassLoader cl,
-                                          final long settleMs,
-                                          final long maxWaitMs,
-                                          final long startTs,
-                                          final Runnable terminal) {
-        sMainHandler.postDelayed(() -> {
-            long now = SystemClock.elapsedRealtime();
-            long waited = now - startTs;
-            boolean asrRespondedAfterDispatch = sLastAsrCallbackTs > startTs;
-
-            if (waited >= maxWaitMs) {
-                log("asr-settle TIMEOUT waited=" + waited
-                        + "ms responded=" + asrRespondedAfterDispatch
-                        + " -> terminal anyway");
-                if (terminal != null) {
-                    terminal.run();
-                }
-                return;
-            }
-
-            if (!asrRespondedAfterDispatch) {
-                // Phase 1: still waiting for first post-dispatch ASR callback
-                pollAsrSettleThen(cl, settleMs, maxWaitMs, startTs, terminal);
-                return;
-            }
-
-            // Phase 2: ASR has responded — measure quiet time since last callback
-            long quiet = now - sLastAsrCallbackTs;
-            if (quiet >= settleMs) {
-                log("asr-settle quiet=" + quiet + "ms waited=" + waited + "ms -> terminal");
-                if (terminal != null) {
-                    terminal.run();
-                }
-            } else {
-                pollAsrSettleThen(cl, settleMs, maxWaitMs, startTs, terminal);
-            }
-        }, NEWLINE_ASR_POLL_MS);
-    }
-
     /** Broadcasts a request to our AccessibilityService to click the send button. */
-    private static void broadcastA11ySend(ClassLoader cl, String pkg) {
+    private static void broadcastA11ySend(ClassLoader cl, NativeSend request, String stage, String text) {
         try {
-            android.content.Context ctx = getImeContext(cl);
-            if (ctx == null) {
-                log("skip broadcastA11ySend: mImeService not Context");
-                return;
-            }
-            android.content.Intent intent = new android.content.Intent(
-                    DoubaoVoiceSendA11yService.ACTION_A11Y_SEND)
+            android.content.Context ctx=getImeContext(cl);
+            if(ctx==null)throw new IllegalStateException("IME context missing");
+            android.content.Intent intent=new android.content.Intent(DoubaoVoiceSendA11yService.ACTION_A11Y_SEND)
                     .setPackage("com.jin.doubaolongpressvoice")
-                    .putExtra(DoubaoVoiceSendA11yService.EXTRA_TARGET_PKG, pkg);
-            ctx.sendBroadcast(intent);
-            log("broadcast a11y send pkg=" + pkg);
-        } catch (Throwable t) {
-            log("ERR broadcastA11ySend: " + Log.getStackTraceString(t));
-        }
+                    .addFlags(android.content.Intent.FLAG_RECEIVER_FOREGROUND)
+                    .putExtra(DoubaoVoiceSendA11yService.EXTRA_TARGET_PKG,request.pkg)
+                    .putExtra(DoubaoVoiceSendA11yService.EXTRA_ID,request.id)
+                    .putExtra(DoubaoVoiceSendA11yService.EXTRA_STAGE,stage);
+            if(text!=null)intent.putExtra(DoubaoVoiceSendA11yService.EXTRA_TEXT,text);
+            if(Build.VERSION.SDK_INT>=34) ctx.sendBroadcast(intent,null,
+                    android.app.BroadcastOptions.makeBasic().setShareIdentityEnabled(true).toBundle());
+            else throw new IllegalStateException("authenticated send requires Android 14");
+        } catch(Exception e) {diag("ERR a11y broadcast stage="+stage+": "+Log.getStackTraceString(e));}
     }
 
     private static android.content.Context getImeContext(ClassLoader cl) {
@@ -1211,8 +1383,6 @@ public final class DoubaoLetterLongPressHook {
         if (mgr != null) {
             callAsrStop(mgr, true, ASR_CANCEL_REASON, "cancel");
         }
-        // Diagnostic probe: log whether L.a all-back fires on cancel (does NOT change behavior).
-        subscribeAsrAllBackThen(cl, 2000L, null);
     }
 
     private static void cancelPendingCommit() {
@@ -1255,7 +1425,7 @@ public final class DoubaoLetterLongPressHook {
             return;
         }
         try {
-            XposedHelpers.callMethod(sUserInteractiveMgr, "g",
+            sCompat.invoke("feedback", sUserInteractiveMgr,
                     sKeySoundKeyboard, sKeyVibrateStandard, sVibTypeSpeechStart, false);
         } catch (Throwable t) {
             log("ERR feedback: " + t.getClass().getSimpleName());
@@ -1268,7 +1438,7 @@ public final class DoubaoLetterLongPressHook {
             return;
         }
         try {
-            XposedHelpers.callMethod(sUserInteractiveMgr, "g",
+            sCompat.invoke("feedback", sUserInteractiveMgr,
                     sKeySoundKeyboard, sKeyVibrateStandard, sVibTypeConfirm, false);
         } catch (Throwable ignore) {
         }
@@ -1331,7 +1501,7 @@ public final class DoubaoLetterLongPressHook {
         }
         try {
             Class<?> mgrClass = XposedHelpers.findClass(USER_INTERACTIVE_MGR, cl);
-            sUserInteractiveMgr = XposedHelpers.getStaticObjectField(mgrClass, "a");
+            sUserInteractiveMgr = sCompat.object("feedbackManager");
 
             Class<?> soundEnum = XposedHelpers.findClass(USER_INTERACTIVE_MGR + "$KeySound", cl);
             sKeySoundKeyboard = XposedHelpers.getStaticObjectField(soundEnum, "KEYBOARD");
@@ -1402,152 +1572,50 @@ public final class DoubaoLetterLongPressHook {
     }
 
     private static Object ensureAsrProcess(ClassLoader cl) {
-        if (sAsrProcess != null) {
-            return sAsrProcess;
-        }
-        if (sAsrProcessResolveAttempted) {
-            return null;
-        }
-        sAsrProcessResolveAttempted = true;
-        try {
-            Class<?> cls = XposedHelpers.findClass(ASR_MANAGER, cl);
-            sAsrProcess = XposedHelpers.getStaticObjectField(cls, "b");
-            log("AsrProcess resolved: " + (sAsrProcess != null));
-        } catch (Throwable t) {
-            log("ERR ensureAsrProcess: " + t.getClass().getSimpleName());
-        }
-        return sAsrProcess;
+        try { return sCompat.object("process"); }
+        catch (Exception e) { throw new IllegalStateException("ASR process unavailable", e); }
     }
 
-    private static Class<?> ensureListenerCls(ClassLoader cl) {
-        if (sListenerCls != null) {
-            return sListenerCls;
-        }
-        if (sListenerClsResolveAttempted) {
-            return null;
-        }
-        sListenerClsResolveAttempted = true;
-        // Try hardcoded name first.
-        try {
-            sListenerCls = XposedHelpers.findClass(ASR_ALL_BACK_LISTENER_CLS, cl);
-            if (sListenerCls != null) {
-                log("L$a resolved by name");
-                return sListenerCls;
-            }
-        } catch (Throwable ignore) {}
-        // Fallback: discover the interface by inspecting AsrProcess.w() parameter type.
-        // Avoids dependence on obfuscated class name across Doubao versions.
-        try {
-            Object proc = ensureAsrProcess(cl);
-            if (proc != null) {
-                for (java.lang.reflect.Method m : proc.getClass().getDeclaredMethods()) {
-                    if ("w".equals(m.getName()) && m.getParameterCount() == 1) {
-                        Class<?> param = m.getParameterTypes()[0];
-                        if (param.isInterface()) {
-                            sListenerCls = param;
-                            log("L$a discovered via AsrProcess.w() param: " + param.getName());
-                            return sListenerCls;
-                        }
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            log("ERR ensureListenerCls discover: " + t.getClass().getSimpleName());
-        }
-        log("ERR ensureListenerCls: not found");
-        return null;
+    private static void safeW(Object proc, Class<?> listenerClass, Object listener) {
+        try { sCompat.invoke("listenerSetter", proc, listener); }
+        catch (Exception e) { diag("ERR listener unregister: " + Log.getStackTraceString(e)); }
     }
 
-    private static void safeW(Object proc, Class<?> lcls, Object listener) {
-        try {
-            XposedHelpers.callMethod(proc, "w",
-                    new Class<?>[]{lcls}, new Object[]{listener});
-        } catch (Throwable ignore) {
-        }
-    }
-
-    /**
-     * Replaces {@link #pollAsrSettleThen}: registers a one-shot {@code L$a}
-     * all-back listener on {@code AsrManager.b} (AsrProcess). When
-     * {@code s.g()==true} fires the terminal action runs on the main thread.
-     * Falls back to {@link #pollAsrSettleThen} if listener or AsrProcess
-     * cannot be resolved, or if {@code z.w()} throws.
-     *
-     * <p>Register BEFORE calling {@code p0()} so the all-back event is not missed.
-     */
+    /** Await the native all-back event. A timeout aborts the terminal action, never guesses completion. */
     private static void subscribeAsrAllBackThen(
             final ClassLoader cl, final long maxWaitMs, final Runnable terminal) {
-        Object proc = ensureAsrProcess(cl);
-        Class<?> lcls = ensureListenerCls(cl);
-        if (proc == null || lcls == null) {
-            log("subscribeAsrAllBack: fallback poll (proc=" + (proc != null)
-                    + " lcls=" + (lcls != null) + ")");
-            pollAsrSettleThen(cl, NEWLINE_ASR_SETTLE_MS, maxWaitMs,
-                    SystemClock.elapsedRealtime(), terminal);
-            return;
-        }
-
-        final boolean[] done = {false};
-        final Runnable[] timeoutRef = {null};
-        Object listener;
         try {
-            listener = java.lang.reflect.Proxy.newProxyInstance(
-                    cl,
-                    new Class<?>[]{lcls},
+            final Object proc = ensureAsrProcess(cl);
+            final Class<?> listenerClass = sCompat.listenerClass();
+            final java.util.concurrent.atomic.AtomicBoolean done = new java.util.concurrent.atomic.AtomicBoolean();
+            final Runnable[] timeoutRef = new Runnable[1];
+            Object listener = java.lang.reflect.Proxy.newProxyInstance(cl, new Class<?>[]{listenerClass},
                     (proxy, method, args) -> {
-                        if (!"a".equals(method.getName())
-                                || args == null || args.length != 1) {
-                            return null;
+                        if (method.getDeclaringClass() == Object.class) {
+                            if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                            if ("equals".equals(method.getName())) return proxy == args[0];
+                            return "DoubaoAllBackListener";
                         }
-                        try {
-                            boolean allBack =
-                                    (Boolean) XposedHelpers.callMethod(args[0], "g");
-                            if (!allBack || done[0]) {
-                                return null;
-                            }
-                            done[0] = true;
-                            if (timeoutRef[0] != null) {
-                                sMainHandler.removeCallbacks(timeoutRef[0]);
-                            }
-                            safeW(proc, lcls, null);
-                            if (terminal != null) {
-                                sMainHandler.post(terminal);
-                            }
-                            log("asr-allback: s.g()=true -> terminal");
-                        } catch (Throwable t) {
-                            log("ERR allBack listener: " + t.getClass().getSimpleName());
-                        }
+                        if (!method.equals(sCompat.method("callback")))
+                            throw new IllegalStateException("unexpected callback: " + method);
+                        boolean allBack = (Boolean) sCompat.invoke("allBack", args[0]);
+                        if (allBack && done.compareAndSet(false, true)) sMainHandler.post(() -> {
+                            sMainHandler.removeCallbacks(timeoutRef[0]);
+                            safeW(proc, listenerClass, null);
+                            diag("asr-allback: confirmed -> terminal");
+                            if (terminal != null) terminal.run();
+                        });
                         return null;
                     });
-        } catch (Throwable t) {
-            log("ERR Proxy L$a: " + t.getClass().getSimpleName() + " -> poll fallback");
-            pollAsrSettleThen(cl, NEWLINE_ASR_SETTLE_MS, maxWaitMs,
-                    SystemClock.elapsedRealtime(), terminal);
-            return;
-        }
-
-        Runnable timeout = () -> {
-            if (done[0]) {
-                return;
-            }
-            done[0] = true;
-            safeW(proc, lcls, null);
-            log("asr-allback: TIMEOUT " + maxWaitMs + "ms -> terminal");
-            if (terminal != null) {
-                terminal.run();
-            }
-        };
-        timeoutRef[0] = timeout;
-        try {
-            XposedHelpers.callMethod(proc, "w",
-                    new Class<?>[]{lcls}, new Object[]{listener});
-            sMainHandler.postDelayed(timeout, maxWaitMs);
-            log("asr-allback: listener registered timeout=" + maxWaitMs + "ms");
-        } catch (Throwable t) {
-            log("ERR asrProcess.w(): " + t.getClass().getSimpleName() + " -> poll fallback");
-            sMainHandler.removeCallbacks(timeout);
-            pollAsrSettleThen(cl, NEWLINE_ASR_SETTLE_MS, maxWaitMs,
-                    SystemClock.elapsedRealtime(), terminal);
+            timeoutRef[0] = () -> {
+                if (!done.compareAndSet(false, true)) return;
+                safeW(proc, listenerClass, null);
+                diag("ERR asr-allback timeout; terminal action aborted");
+            };
+            sCompat.invoke("listenerSetter", proc, listener);
+            sMainHandler.postDelayed(timeoutRef[0], maxWaitMs);
+        } catch (Exception e) {
+            diag("ERR asr-allback subscription; terminal aborted: " + Log.getStackTraceString(e));
         }
     }
 
@@ -1630,6 +1698,20 @@ public final class DoubaoLetterLongPressHook {
      * on any failure (no service, no editor info, missing field) — callers must
      * treat null as "not in any whitelist".
      */
+    private static boolean isA11yEditor(ClassLoader cl, String pkg) {
+        if(pkg==null || !A11Y_SEND_PACKAGES.contains(pkg))return false;
+        try {
+            EditorInfo editor=imeService(cl).getCurrentInputEditorInfo();
+            if(editor==null || (editor.imeOptions & EditorInfo.IME_MASK_ACTION)==EditorInfo.IME_ACTION_SEARCH)return false;
+            if(!pkg.equals("com.google.android.googlequicksearchbox"))return true;
+            String viewId=imeService(cl).getPackageManager().getResourcesForApplication(pkg).getResourceName(editor.fieldId);
+            return SendTargets.allowedEditor(pkg,viewId);
+        } catch(Exception e) {
+            diag("a11y editor not identified pkg="+pkg+" cause="+e.getClass().getSimpleName());
+            return false;
+        }
+    }
+
     private static String currentEditorPackageName(ClassLoader cl) {
         try {
             Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
@@ -1870,46 +1952,14 @@ public final class DoubaoLetterLongPressHook {
      * + candidates + keyboard) from {@code ImeService}.
      */
     private static Object getInputView(ClassLoader cl) {
-        try {
-            Class<?> imeServiceCls = XposedHelpers.findClass(IME_SERVICE, cl);
-            try {
-                return XposedHelpers.getStaticObjectField(imeServiceCls, "y");
-            } catch (Throwable ignore) {
-            }
-            for (Field f : imeServiceCls.getDeclaredFields()) {
-                if (Modifier.isStatic(f.getModifiers())
-                        && FrameLayout.class.isAssignableFrom(f.getType())) {
-                    f.setAccessible(true);
-                    Object v = f.get(null);
-                    if (v != null) {
-                        return v;
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            log("ERR getInputView: " + t.getClass().getSimpleName());
-        }
-        return null;
+        try { return sCompat.inputView(); }
+        catch (Exception e) { throw new IllegalStateException("input view unavailable", e); }
     }
 
-    /** Tidies up Doubao's ASR long-press UI before sending or committing. */
     private static void callInputViewCloseAsrUi(Object inputView, boolean z) {
-        if (inputView == null) {
-            return;
-        }
-        try {
-            XposedHelpers.callMethod(inputView, "T", z);
-            log("InputView.T(" + z + ") fired (close ASR UI)");
-            return;
-        } catch (Throwable t) {
-            log("ERR InputView.T(): " + t.getClass().getSimpleName());
-        }
-        try {
-            XposedHelpers.callMethod(inputView, "R", z);
-            log("InputView.R(" + z + ") fired (close ASR UI)");
-        } catch (Throwable t) {
-            log("ERR InputView.R(boolean): " + t.getClass().getSimpleName());
-        }
+        if (inputView == null) throw new IllegalStateException("input view not initialized");
+        try { sCompat.invoke("closePanel", inputView, z); }
+        catch (Exception e) { throw new IllegalStateException("close ASR panel failed", e); }
     }
 
     /**
@@ -1918,18 +1968,8 @@ public final class DoubaoLetterLongPressHook {
      * what AsrLongPressView reads when picking its right-button text.
      */
     private static int resolveEnterOrdinal(ClassLoader cl) {
-        // EditorViewInfo.e().d() is the authoritative source (used by AsrLongPressView).
-        int fromEditorViewInfo = readEnterTypeFromEditorViewInfo(cl);
-        if (fromEditorViewInfo >= 2 && fromEditorViewInfo <= 8) {
-            return fromEditorViewInfo;
-        }
-        // Fallback: mCurrentEnterType (may be stale in some editors).
-        int fromEnterType = readEnterTypeOrdinal(cl);
-        if (fromEnterType >= 2 && fromEnterType <= 8) {
-            return fromEnterType;
-        }
-        // Return best non-negative value for diagnostic clarity.
-        return Math.max(0, Math.max(fromEditorViewInfo, fromEnterType));
+        try { return (Integer) sCompat.invoke("enterAction", sCompat.object("editor")); }
+        catch (Exception e) { throw new IllegalStateException("editor action unavailable", e); }
     }
 
     /**
@@ -1960,36 +2000,12 @@ public final class DoubaoLetterLongPressHook {
         // overlay label/icon must read 发送, not 换行 — even though the editor
         // only reports a newline-class ordinal.
         if (pkg != null && (FORCE_SEND_PACKAGES.contains(pkg)
-                || A11Y_SEND_PACKAGES.contains(pkg))) {
+                || isA11yEditor(cl, pkg))) {
             log("send-label override: pkg=" + pkg + " original ord=" + ord
                     + " -> IME_ACTION_SEND");
             return IME_ACTION_SEND_ORDINAL;
         }
         return ord;
-    }
-
-    private static int readEnterTypeOrdinal(ClassLoader cl) {
-        try {
-            Class<?> jni = XposedHelpers.findClass(KEYBOARD_JNI, cl);
-            Object v = XposedHelpers.getStaticObjectField(jni, "mCurrentEnterType");
-            if (v instanceof Enum) {
-                return ((Enum<?>) v).ordinal();
-            }
-            return -1;
-        } catch (Throwable t) {
-            return -1;
-        }
-    }
-
-    private static int readEnterTypeFromEditorViewInfo(ClassLoader cl) {
-        try {
-            Class<?> oClass = XposedHelpers.findClass(EDITOR_VIEW_INFO, cl);
-            Object instance = XposedHelpers.callStaticMethod(oClass, "e");
-            Object v = XposedHelpers.callMethod(instance, "d");
-            return (v instanceof Integer) ? (Integer) v : -1;
-        } catch (Throwable t) {
-            return -1;
-        }
     }
 
     /**
@@ -2359,14 +2375,7 @@ public final class DoubaoLetterLongPressHook {
     }
 
     private static String safeText(String text) {
-        if (text == null) {
-            return "null";
-        }
-        int n = text.length();
-        if (n <= 20) {
-            return "'" + text + "'";
-        }
-        return "'" + text.substring(0, 20) + "...'(len=" + n + ")";
+        return text == null ? "null" : "[length=" + text.length() + "]";
     }
 
     private static String actionName(int action) {

@@ -1,0 +1,8 @@
+DexKit 2.3.0 — https://github.com/LuckyPray/DexKit/tree/2.3.0
+Repository root: Apache-2.0 (DexKit-LICENSE.txt).
+Native Core: LGPL-3.0 (DexKit-Core-LGPL-3.0.txt), Copyright (C) 2022 LuckyPray.
+Unmodified upstream source: https://github.com/LuckyPray/DexKit/archive/refs/tags/2.3.0.tar.gz
+The libdexkit.so binary is shipped as a separate dynamically loaded library from the upstream Maven AAR.
+Kotlin standard library 1.5.0 — https://github.com/JetBrains/kotlin — Apache-2.0
+FlatBuffers Java 23.5.26 — https://github.com/google/flatbuffers — Apache-2.0
+These components retain their respective licenses. This notice does not relicense them.

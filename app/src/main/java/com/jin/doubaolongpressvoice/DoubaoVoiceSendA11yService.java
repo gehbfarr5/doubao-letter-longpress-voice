@@ -9,130 +9,190 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.graphics.Rect;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
-/**
- * Accessibility bridge for apps whose send action is only exposed as a UI
- * button click rather than an IME action.
- */
+/** Native completion grants one click on the same focused editor, never a timed guess. */
 public class DoubaoVoiceSendA11yService extends AccessibilityService {
-
-    public static final String ACTION_A11Y_SEND =
-            "com.jin.doubaolongpressvoice.ACTION_A11Y_SEND";
+    public static final String ACTION_A11Y_SEND = "com.jin.doubaolongpressvoice.ACTION_A11Y_SEND";
     public static final String EXTRA_TARGET_PKG = "target_pkg";
-
+    static final String EXTRA_ID = "request_id", EXTRA_STAGE = "stage", EXTRA_TEXT = "final_text";
+    static final String PREPARE = "prepare", READY = "ready", CANCEL = "cancel";
     private static final String TAG = "DoubaoVoiceSend";
-    private static final int MAX_DUMP_DEPTH = 25;
-    private static final int MAX_DUMP_NODES = 200;
-
-    /**
-     * Send-button keywords matched against contentDescription / text
-     * (case-insensitive substring). Includes Chinese because Claude/ChatGPT
-     * localize their button labels, and Compose/WebView nodes commonly carry
-     * a localized contentDescription rather than English "send".
-     */
-    private static final String[] SEND_KEYWORDS = {
-            "send", "发送", "提交", "发送消息", "send message", "send prompt"
-    };
-    /** Keywords that disqualify a node from being the send button. */
-    private static final String[] EXCLUDE_KEYWORDS = {
-            "图片", "文件", "image", "file", "attachment", "photo", "album", "表情", "emoji"
-    };
-    /**
-     * Known stable resource-id for the send button, keyed by package name.
-     * null = no stable id available for this package (fall back to heuristic).
-     *
-     * NOTE: every entry is currently {@code null} — the per-package viewId
-     * fast path in {@link #performSend} is a reserved placeholder and never
-     * fires yet. All sends go through the keyword heuristic in
-     * {@link #findSendNode}. Populate these from real-device logcat dumps
-     * (run with {@code adb logcat -s DoubaoVoiceSend} and read the node dump)
-     * to enable exact-match clicking; update when apps change.
-     */
-    private static final java.util.Map<String, String> PACKAGE_SEND_VIEW_ID;
-    static {
-        PACKAGE_SEND_VIEW_ID = new java.util.HashMap<>();
-        PACKAGE_SEND_VIEW_ID.put("com.anthropic.claude", null);
-        PACKAGE_SEND_VIEW_ID.put("com.openai.chatgpt", null);
-    }
-
+    private static volatile boolean sBound;
+    private final Handler handler = new Handler(Looper.getMainLooper());
     private BroadcastReceiver mReceiver;
     private boolean mReceiverRegistered;
+    private SendTransaction pending;
+    private long lastPreparedId;
+    private AccessibilityNodeInfo editorIdentity;
+    private final Runnable expire = () -> finish("deadline; no retry");
 
-    @Override
-    protected void onServiceConnected() {
-        super.onServiceConnected();
-        registerSendReceiver();
-        startKeepAliveForeground();
+    static boolean isBound() { return sBound; }
+
+    @Override protected void onServiceConnected() {
+        super.onServiceConnected(); sBound = true; registerSendReceiver(); startKeepAliveForeground();
     }
-
-    @Override
-    public boolean onUnbind(Intent intent) {
-        stopForeground(true);
-        unregisterSendReceiver();
+    @Override public boolean onUnbind(Intent intent) {
+        sBound = false; finish("service unbound"); stopForeground(true); unregisterSendReceiver();
         return super.onUnbind(intent);
     }
-
-    @Override
-    public void onDestroy() {
-        try {
-            stopForeground(true);
-        } catch (Throwable t) {
-            // ignore
+    @Override public void onDestroy() {
+        sBound = false; finish("service destroyed"); stopForeground(true); unregisterSendReceiver(); super.onDestroy();
+    }
+    @Override public void onInterrupt() { finish("interrupted"); }
+    @Override public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (pending == null || event == null) return;
+        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                && event.getPackageName() != null
+                && !pending.packageName.contentEquals(event.getPackageName())
+                && !"com.bytedance.android.doubaoime".contentEquals(event.getPackageName())) {
+            finish("foreground changed"); return;
         }
-        unregisterSendReceiver();
-        super.onDestroy();
+        checkTarget();
     }
-
-    @Override
-    public void onAccessibilityEvent(AccessibilityEvent event) {
-    }
-
-    @Override
-    public void onInterrupt() {
-    }
-
-    // API 33+ uses RECEIVER_EXPORTED because the request is sent from the Doubao
-    // IME process. Older platform APIs do not expose receiver export flags.
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private void registerSendReceiver() {
-        try {
-            if (mReceiverRegistered) {
-                return;
+        if (mReceiverRegistered) return;
+        mReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                if (intent == null || !ACTION_A11Y_SEND.equals(intent.getAction())) return;
+                // Identity sharing is supported on Android 14+. Older hosts cannot authorize
+                // this cross-process click protocol, so retain text instead of accepting a spoof.
+                if (Build.VERSION.SDK_INT < 34 || !"com.bytedance.android.doubaoime".equals(getSentFromPackage())) {
+                    Log.w(TAG,"request rejected: unverified sender"); return;
+                }
+                try { receive(intent); }
+                catch (RuntimeException e) { Log.e(TAG,"send protocol failed",e); finish("protocol error"); }
             }
-            if (mReceiver == null) {
-                mReceiver = new BroadcastReceiver() {
-                    @Override
-                    public void onReceive(Context context, Intent intent) {
-                        try {
-                            if (intent == null || !ACTION_A11Y_SEND.equals(intent.getAction())) {
-                                return;
-                            }
-                            String targetPkg = intent.getStringExtra(EXTRA_TARGET_PKG);
-                            performSend(targetPkg);
-                        } catch (Throwable t) {
-                            Log.w(TAG, "ERR receiver onReceive: " + Log.getStackTraceString(t));
-                        }
-                    }
-                };
+        };
+        IntentFilter filter = new IntentFilter(ACTION_A11Y_SEND);
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(mReceiver,filter,Context.RECEIVER_EXPORTED);
+        else registerReceiver(mReceiver,filter);
+        mReceiverRegistered = true;
+        Log.i(TAG,"a11y send receiver registered");
+    }
+    private void receive(Intent intent) {
+        long id = intent.getLongExtra(EXTRA_ID,0);
+        String pkg = intent.getStringExtra(EXTRA_TARGET_PKG);
+        String stage = intent.getStringExtra(EXTRA_STAGE);
+        if (id <= 0 || !SendTargets.A11Y.contains(pkg)) return;
+        if (PREPARE.equals(stage)) {
+            if (id <= lastPreparedId || Math.abs(System.currentTimeMillis()-id)>30_000L) return;
+            lastPreparedId=id;
+            finish("superseded");
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) { Log.w(TAG,"prepare: no active window"); return; }
+            try {
+                if (!pkg.contentEquals(root.getPackageName())) { Log.w(TAG,"prepare: wrong foreground"); return; }
+                AccessibilityNodeInfo editor = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                if (editor == null) { Log.w(TAG,"prepare: no focused editor"); return; }
+                try {
+                    if (!validEditor(editor,pkg)) { Log.w(TAG,"prepare: unsupported editor"); return; }
+                    editorIdentity = AccessibilityNodeInfo.obtain(editor);
+                    pending = new SendTransaction(id,pkg,root.getWindowId(),SystemClock.elapsedRealtime());
+                    handler.postDelayed(expire,30_000L);
+                    Log.i(TAG,"prepared id="+id+" pkg="+pkg+" window="+root.getWindowId());
+                } finally { editor.recycle(); }
+            } finally { root.recycle(); }
+        } else if (pending != null && pending.id == id && pending.packageName.equals(pkg)) {
+            if (CANCEL.equals(stage)) finish("IME cancelled");
+            else if (READY.equals(stage) && pending.ready(id,intent.getStringExtra(EXTRA_TEXT),SystemClock.elapsedRealtime())) {
+                handler.removeCallbacks(expire); handler.postDelayed(expire,2_000L);
+                Log.i(TAG,"native ready id="+id+" elapsedMs="+(SystemClock.elapsedRealtime()-pending.startedAt));
+                checkTarget();
             }
-            IntentFilter filter = new IntentFilter(ACTION_A11Y_SEND);
-            if (Build.VERSION.SDK_INT >= 33) {
-                registerReceiver(mReceiver, filter, Context.RECEIVER_EXPORTED);
-            } else {
-                registerReceiver(mReceiver, filter);
-            }
-            mReceiverRegistered = true;
-            Log.i(TAG, "a11y send receiver registered");
-        } catch (Throwable t) {
-            Log.w(TAG, "ERR register receiver: " + Log.getStackTraceString(t));
         }
     }
-
+    private boolean validEditor(AccessibilityNodeInfo node, String pkg) {
+        return pkg.contentEquals(node.getPackageName()) && node.isEditable() && node.isFocused()
+                && node.isEnabled() && node.isVisibleToUser() && !node.isPassword()
+                && SendTargets.allowedEditor(pkg,node.getViewIdResourceName());
+    }
+    private void checkTarget() {
+        SendTransaction t=pending;
+        if(t==null) return;
+        AccessibilityNodeInfo root=getRootInActiveWindow();
+        if(root==null) { finish("window unavailable"); return; }
+        try {
+            if(!t.packageName.contentEquals(root.getPackageName()) || t.windowId!=root.getWindowId()) {
+                finish("window changed"); return;
+            }
+            AccessibilityNodeInfo editor=root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            if(editor==null) { finish("editor lost focus"); return; }
+            try {
+                boolean same=editorIdentity!=null && editorIdentity.equals(editor) && validEditor(editor,t.packageName);
+                if(!same || t.expired(SystemClock.elapsedRealtime())) { finish("editor changed or expired"); return; }
+                String text=editor.isShowingHintText()?"":String.valueOf(editor.getText()==null?"":editor.getText());
+                if(t.observeCleared(true,text)) { finish("editor cleared after click; delivery not asserted"); return; }
+                if(t.state()!=SendTransaction.State.READY) return;
+                List<AccessibilityNodeInfo> buttons=findButtonsNearEditor(editor,t.packageName);
+                try {
+                    boolean enabled=buttons.size()==1 && buttons.get(0).isEnabled() && buttons.get(0).isVisibleToUser();
+                    if(t.claimClick(t.packageName,root.getWindowId(),same,text,buttons.size(),enabled,SystemClock.elapsedRealtime())) {
+                        boolean clicked=buttons.get(0).performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                        Log.i(TAG,"click attempted id="+t.id+" accepted="+clicked+" elapsedMs="+(SystemClock.elapsedRealtime()-t.startedAt));
+                        // A false return can be an uncertain delivery; never issue a second click.
+                        handler.removeCallbacks(expire); handler.postDelayed(expire,2_000L);
+                    }
+                } finally { for(AccessibilityNodeInfo n:buttons)n.recycle(); }
+            } finally { editor.recycle(); }
+        } catch(RuntimeException e) { Log.e(TAG,"target check failed",e); finish("node error"); }
+        finally { root.recycle(); }
+    }
+    /** Find the smallest ancestor containing the editor and an unambiguous labelled send action. */
+    private List<AccessibilityNodeInfo> findButtonsNearEditor(AccessibilityNodeInfo editor,String pkg) {
+        AccessibilityNodeInfo container=editor.getParent();
+        for(int level=0;container!=null && level<16;level++) {
+            List<AccessibilityNodeInfo> found=new ArrayList<>();
+            try {
+                collect(container,container,pkg,found,new HashSet<>(),new int[]{0},0);
+                if(!found.isEmpty()) return found;
+                AccessibilityNodeInfo parent=container.getParent(); container.recycle(); container=parent;
+            } catch(RuntimeException e) { for(AccessibilityNodeInfo n:found)n.recycle(); throw e; }
+            finally { if(!found.isEmpty())container.recycle(); }
+        }
+        if(container!=null)container.recycle();
+        return new ArrayList<>();
+    }
+    private void collect(AccessibilityNodeInfo node,AccessibilityNodeInfo boundary,String pkg,List<AccessibilityNodeInfo> out,
+                         Set<AccessibilityNodeInfo> seen,int[] visited,int depth) {
+        if(node==null || !pkg.contentEquals(node.getPackageName()))return;
+        if(++visited[0]>600 || depth>50)throw new IllegalStateException("node traversal budget exceeded");
+        boolean label=SendTargets.sendControl(pkg,node.getViewIdResourceName(),
+                node.getContentDescription(),node.getClassName(),node.getText());
+        if(label && node.isVisibleToUser()) {
+            AccessibilityNodeInfo action=AccessibilityNodeInfo.obtain(node);
+            // Compose Remote wraps the label in four non-clickable nodes.
+            // Walk wrappers, but never promote the enclosing composer into a send action.
+            for(int i=0;i<8 && action!=null && !action.equals(boundary);i++) {
+                if(action.isClickable() || action.getActionList().contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK)) {
+                    if(seen.add(action))out.add(action); else action.recycle();
+                    action=null; break;
+                }
+                AccessibilityNodeInfo parent=action.getParent(); action.recycle(); action=parent;
+            }
+            if(action!=null)action.recycle();
+        }
+        for(int i=0;i<node.getChildCount();i++) {
+            AccessibilityNodeInfo child=node.getChild(i);
+            if(child!=null)try { collect(child,boundary,pkg,out,seen,visited,depth+1); } finally { child.recycle(); }
+        }
+    }
+    private void finish(String reason) {
+        handler.removeCallbacks(expire);
+        if(pending!=null) { Log.i(TAG,"send end id="+pending.id+" state="+pending.state()+" reason="+reason); pending.abort(); pending=null; }
+        if(editorIdentity!=null) { editorIdentity.recycle(); editorIdentity=null; }
+    }
     private void startKeepAliveForeground() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -178,312 +238,4 @@ public class DoubaoVoiceSendA11yService extends AccessibilityService {
         }
     }
 
-    private void performSend(String targetPkg) {
-        try {
-            AccessibilityNodeInfo root = getRootInActiveWindow();
-            if (root == null) {
-                Log.w(TAG, "performSend: root null targetPkg=" + targetPkg);
-                return;
-            }
-            try {
-                CharSequence rootPkg = root.getPackageName();
-                if (targetPkg != null && rootPkg != null
-                        && !targetPkg.contentEquals(rootPkg)) {
-                    Log.w(TAG, "performSend: active pkg=" + rootPkg
-                            + " targetPkg=" + targetPkg + ", still trying");
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "ERR read root package: " + t.getClass().getSimpleName());
-            }
-
-            // Fast path: per-package stable viewId (if known).
-            if (targetPkg != null && PACKAGE_SEND_VIEW_ID.containsKey(targetPkg)) {
-                String viewId = PACKAGE_SEND_VIEW_ID.get(targetPkg);
-                if (viewId != null) {
-                    java.util.List<AccessibilityNodeInfo> byId =
-                            root.findAccessibilityNodeInfosByViewId(viewId);
-                    if (byId != null && !byId.isEmpty()) {
-                        AccessibilityNodeInfo n = byId.get(0);
-                        AccessibilityNodeInfo clickable = nearestClickable(n);
-                        if (clickable == null) {
-                            clickable = n;
-                        }
-                        boolean ok = clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                        Log.i(TAG, "performSend(viewId): ACTION_CLICK ok=" + ok
-                                + " viewId=" + viewId);
-                        return;
-                    }
-                }
-            }
-
-            AccessibilityNodeInfo node = findSendNode(root, targetPkg);
-            if (node != null) {
-                AccessibilityNodeInfo clickable = nearestClickable(node);
-                if (clickable == null) {
-                    clickable = node;
-                }
-                boolean ok = clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                Log.i(TAG, "performSend: ACTION_CLICK ok=" + ok
-                        + " viewId=" + safeViewId(clickable)
-                        + " desc=" + safeText(clickable.getContentDescription()));
-                return;
-            }
-
-            Log.w(TAG, "performSend: no send node targetPkg=" + targetPkg
-                    + ", dumping clickables");
-            dumpClickables(root);
-        } catch (Throwable t) {
-            Log.w(TAG, "ERR performSend: " + Log.getStackTraceString(t));
-        }
-    }
-
-    private AccessibilityNodeInfo findSendNode(AccessibilityNodeInfo root, String targetPkg) {
-        try {
-            if (root == null) {
-                return null;
-            }
-            java.util.List<AccessibilityNodeInfo> candidates = new java.util.ArrayList<>();
-            collectSendCandidates(root, candidates);
-            if (candidates.isEmpty()) {
-                return null;
-            }
-            final int screenWidth = getResources().getDisplayMetrics().widthPixels;
-            java.util.Collections.sort(candidates, new java.util.Comparator<AccessibilityNodeInfo>() {
-                @Override
-                public int compare(AccessibilityNodeInfo a, AccessibilityNodeInfo b) {
-                    int scoreA = candidateScore(a, screenWidth);
-                    int scoreB = candidateScore(b, screenWidth);
-                    return Integer.compare(scoreB, scoreA);
-                }
-            });
-            return candidates.get(0);
-        } catch (Throwable t) {
-            Log.w(TAG, "ERR findSendNode: " + t.getClass().getSimpleName());
-            return null;
-        }
-    }
-
-    /** DFS: collect ALL nodes that match send keywords, are not excluded, and are actionable. */
-    private void collectSendCandidates(AccessibilityNodeInfo node,
-            java.util.List<AccessibilityNodeInfo> out) {
-        try {
-            if (node == null) {
-                return;
-            }
-            if (matchesSendCandidate(node)) {
-                AccessibilityNodeInfo clickable = nearestClickable(node);
-                out.add(clickable != null ? clickable : node);
-            }
-            int count = node.getChildCount();
-            for (int i = 0; i < count; i++) {
-                try {
-                    AccessibilityNodeInfo child = node.getChild(i);
-                    collectSendCandidates(child, out);
-                } catch (Throwable t) {
-                    // skip
-                }
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "ERR collectSendCandidates: " + t.getClass().getSimpleName());
-        }
-    }
-
-    /**
-     * A node is a send candidate if:
-     * 1. Its text or description contains a send keyword
-     * 2. It does NOT contain an exclude keyword
-     * 3. It is actionable (or has an actionable ancestor)
-     */
-    private boolean matchesSendCandidate(AccessibilityNodeInfo node) {
-        try {
-            if (!containsSend(node.getContentDescription()) && !containsSend(node.getText())) {
-                return false;
-            }
-            if (isExcluded(node)) {
-                return false;
-            }
-            return supportsClick(node) || nearestClickable(node) != null;
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
-    private int candidateScore(AccessibilityNodeInfo node, int screenWidth) {
-        int score = 0;
-        try {
-            if (isExactSendMatch(node)) {
-                score += 100;
-            }
-            Rect bounds = new Rect();
-            node.getBoundsInScreen(bounds);
-            if (screenWidth > 0 && bounds.centerX() > screenWidth * 0.6f) {
-                score += 10;
-            }
-            score += Math.min(9, (bounds.width() * bounds.height()) / 10000);
-        } catch (Throwable t) {
-            // ignore
-        }
-        return score;
-    }
-
-    /** Walks up to the nearest ancestor that can receive an ACTION_CLICK. */
-    private AccessibilityNodeInfo nearestClickable(AccessibilityNodeInfo node) {
-        AccessibilityNodeInfo cur = node;
-        while (cur != null) {
-            try {
-                if (supportsClick(cur)) {
-                    return cur;
-                }
-                cur = cur.getParent();
-            } catch (Throwable t) {
-                Log.w(TAG, "ERR nearestClickable: " + t.getClass().getSimpleName());
-                return null;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * True if the node accepts a click — either the classic {@code isClickable()}
-     * flag (View-based / WebView) or an {@code ACTION_CLICK} entry in its action
-     * list (Jetpack Compose exposes semantic actions this way).
-     */
-    private boolean supportsClick(AccessibilityNodeInfo node) {
-        try {
-            if (node == null) {
-                return false;
-            }
-            if (node.isClickable()) {
-                return true;
-            }
-            java.util.List<AccessibilityNodeInfo.AccessibilityAction> actions = node.getActionList();
-            if (actions != null) {
-                for (AccessibilityNodeInfo.AccessibilityAction a : actions) {
-                    if (a != null && a.getId() == AccessibilityNodeInfo.ACTION_CLICK) {
-                        return true;
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "ERR supportsClick: " + t.getClass().getSimpleName());
-        }
-        return false;
-    }
-
-    private boolean containsSend(CharSequence value) {
-        if (value == null) {
-            return false;
-        }
-        String lower = value.toString().toLowerCase(java.util.Locale.US);
-        for (String kw : SEND_KEYWORDS) {
-            if (lower.contains(kw)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean containsExclude(CharSequence value) {
-        if (value == null) {
-            return false;
-        }
-        String lower = value.toString().toLowerCase(java.util.Locale.US);
-        for (String kw : EXCLUDE_KEYWORDS) {
-            if (lower.contains(kw.toLowerCase(java.util.Locale.US))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean isExcluded(AccessibilityNodeInfo node) {
-        try {
-            return containsExclude(node.getContentDescription())
-                    || containsExclude(node.getText());
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
-    private boolean isExactSendMatch(AccessibilityNodeInfo node) {
-        try {
-            for (CharSequence value : new CharSequence[]{
-                    node.getContentDescription(), node.getText()}) {
-                if (value == null) {
-                    continue;
-                }
-                String s = value.toString().trim().toLowerCase(java.util.Locale.US);
-                for (String kw : SEND_KEYWORDS) {
-                    if (s.equals(kw.toLowerCase(java.util.Locale.US))) {
-                        return true;
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            // ignore
-        }
-        return false;
-    }
-
-    private void dumpClickables(AccessibilityNodeInfo root) {
-        try {
-            int[] count = new int[]{0};
-            dumpClickables(root, 0, count);
-        } catch (Throwable t) {
-            Log.w(TAG, "ERR dumpClickables: " + Log.getStackTraceString(t));
-        }
-    }
-
-    private void dumpClickables(AccessibilityNodeInfo node, int depth, int[] count) {
-        try {
-            if (node == null || depth > MAX_DUMP_DEPTH || count[0] >= MAX_DUMP_NODES) {
-                return;
-            }
-            // Dump anything actionable OR carrying a label — a Compose send button
-            // may not be isClickable() yet still be the node we want, so logging
-            // only isClickable() nodes (the old behavior) printed nothing.
-            boolean actionable = supportsClick(node);
-            CharSequence text = node.getText();
-            CharSequence desc = node.getContentDescription();
-            boolean hasLabel = (text != null && text.length() > 0)
-                    || (desc != null && desc.length() > 0);
-            if (actionable || hasLabel) {
-                Rect bounds = new Rect();
-                node.getBoundsInScreen(bounds);
-                Log.i(TAG, "node[" + count[0] + "] depth=" + depth
-                        + " clickable=" + node.isClickable()
-                        + " actionClick=" + actionable
-                        + " | viewId=" + safeViewId(node)
-                        + " | text=" + safeText(text)
-                        + " | desc=" + safeText(desc)
-                        + " | class=" + safeText(node.getClassName())
-                        + " | bounds=" + bounds);
-                count[0]++;
-            }
-            int childCount = node.getChildCount();
-            for (int i = 0; i < childCount && count[0] < MAX_DUMP_NODES; i++) {
-                AccessibilityNodeInfo child = null;
-                try {
-                    child = node.getChild(i);
-                    dumpClickables(child, depth + 1, count);
-                } catch (Throwable t) {
-                    Log.w(TAG, "ERR dump child: " + t.getClass().getSimpleName());
-                }
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "ERR dumpClickables node: " + t.getClass().getSimpleName());
-        }
-    }
-
-    private String safeViewId(AccessibilityNodeInfo node) {
-        try {
-            return String.valueOf(node.getViewIdResourceName());
-        } catch (Throwable t) {
-            return "";
-        }
-    }
-
-    private String safeText(CharSequence value) {
-        return value == null ? "" : value.toString();
-    }
 }
